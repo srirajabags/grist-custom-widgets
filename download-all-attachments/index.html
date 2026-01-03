@@ -48,6 +48,7 @@
         });
 
         grist.onRecords((records, mappings) => {
+            console.log(records, mappings);
             attachmentIds = [];
             const isMapped = mappings && mappings.attachments;
 
