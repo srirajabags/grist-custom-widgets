@@ -59,7 +59,7 @@
             }
 
             for (const record of records) {
-                const cell = record.attachments;
+                const cell = record[mappings.attachments];
                 if (Array.isArray(cell)) {
                     attachmentIds.push(...cell);
                 } else if (cell) {
