@@ -33,16 +33,16 @@
       
       try {
         // This token is what prevents the 403 error
-        const tokenInfo = await grist.getAccessToken();
+        // const tokenInfo = await grist.getAccessToken();
         const zip = new JSZip();
 
         for (const id of ATTACHMENT_IDS) {
           status.innerText = `Downloading ID: ${id}...`;
           
-          const response = await fetch(`${SERVER_URL}/api/docs/${DOC_ID}/attachments/${id}/download`, {
-            headers: {
-              'Authorization': `Bearer ${tokenInfo.token}`
-            }
+          const response = await fetch(`https://custom-widgets-proxy-production.up.railway.app/download/8vRFY3UUf4spJroktByH4u/${id}`, {
+            // headers: {
+            //   'Authorization': `Bearer ${tokenInfo.token}`
+            // }
           });
 
           if (!response.ok) throw new Error(`Failed to get ID ${id} (Status: ${response.status})`);
