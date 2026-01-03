@@ -1,1 +1,70 @@
-<h1>Download All Attachments</h1>
+<!DOCTYPE html>
+<html>
+<head>
+  <script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <style>
+    body { font-family: sans-serif; padding: 20px; }
+    button { 
+      background: #e67e22; color: white; border: none; padding: 15px; 
+      border-radius: 5px; cursor: pointer; font-weight: bold; width: 100%;
+    }
+    #status { margin-top: 10px; text-align: center; color: #666; }
+  </style>
+</head>
+<body>
+
+  <button id="zipBtn">Download Specific Attachments</button>
+  <div id="status">Ready to download</div>
+
+  <script>
+    // --- MANUALLY SET THESE ---
+    const SERVER_URL = "https://docs.getgrist.com"; // or your custom domain
+    const DOC_ID = "YOUR_DOC_ID_HERE";
+    const ATTACHMENT_IDS = [101, 102, 103]; // Replace with your IDs
+    // --------------------------
+
+    // We still need the API to get the token
+    grist.ready({ requiredAccess: 'full' });
+
+    document.getElementById('zipBtn').onclick = async () => {
+      const status = document.getElementById('status');
+      status.innerText = "Starting...";
+      
+      try {
+        // This token is what prevents the 403 error
+        const tokenInfo = await grist.getAccessToken();
+        const zip = new JSZip();
+
+        for (const id of ATTACHMENT_IDS) {
+          status.innerText = `Downloading ID: ${id}...`;
+          
+          const response = await fetch(`${SERVER_URL}/api/docs/${DOC_ID}/attachments/${id}/download`, {
+            headers: {
+              'Authorization': `Bearer ${tokenInfo.token}`
+            }
+          });
+
+          if (!response.ok) throw new Error(`Failed to get ID ${id} (Status: ${response.status})`);
+
+          const blob = await response.blob();
+          zip.file(`attachment_${id}.bin`, blob); 
+        }
+
+        status.innerText = "Zipping...";
+        const content = await zip.generateAsync({ type: "blob" });
+        
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(content);
+        link.download = "grist_files.zip";
+        link.click();
+        
+        status.innerText = "Success!";
+      } catch (err) {
+        status.innerText = "Error: " + err.message;
+        console.error(err);
+      }
+    };
+  </script>
+</body>
+</html>
