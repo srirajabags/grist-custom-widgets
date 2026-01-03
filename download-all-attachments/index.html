@@ -43,7 +43,7 @@
         let attachmentIds = [];
 
         grist.ready({
-            requiredAccess: 'full',
+            requiredAccess: 'read table',
             columns: [{ name: 'attachments', title: 'Attachments', type: 'Attachments' }]
         });
 
