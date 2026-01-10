@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Plate Orders Batch Processor</title>
+    <script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary: #f39c12;
+            --primary-dark: #d35400;
+            --bg-dark: #121212;
+            --card-bg: rgba(255, 255, 255, 0.05);
+            --text-main: #ffffff;
+            --text-muted: #aaaaaa;
+            --success: #2ecc71;
+            --error: #e74c3c;
+            --border: rgba(255, 255, 255, 0.1);
+        }
+
+        body {
+            font-family: 'Outfit', sans-serif;
+            background-color: var(--bg-dark);
+            color: var(--text-main);
+            margin: 0;
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            overflow-x: hidden;
+        }
+
+        .card {
+            background: var(--card-bg);
+            backdrop-filter: blur(10px);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 20px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+            transition: transform 0.3s ease;
+        }
+
+        h1 {
+            font-size: 1.25rem;
+            margin: 0 0 16px 0;
+            color: var(--primary);
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .description {
+            font-size: 0.9rem;
+            color: var(--text-muted);
+            margin-bottom: 20px;
+        }
+
+        button {
+            background: linear-gradient(135deg, var(--primary), var(--primary-dark));
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 12px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            width: 100%;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(243, 156, 18, 0.3);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 10px;
+        }
+
+        button:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(243, 156, 18, 0.4);
+        }
+
+        button:active:not(:disabled) {
+            transform: translateY(0);
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            filter: grayscale(0.5);
+        }
+
+        /* Stages Styling */
+        .stages-container {
+            display: none;
+            flex-direction: column;
+            gap: 12px;
+            margin-top: 20px;
+        }
+
+        .stage-item {
+            display: flex;
+            align-items: flex-start;
+            gap: 12px;
+            padding: 12px;
+            border-radius: 12px;
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px solid transparent;
+            transition: all 0.3s ease;
+        }
+
+        .stage-item.active {
+            background: rgba(243, 156, 18, 0.1);
+            border-color: rgba(243, 156, 18, 0.3);
+        }
+
+        .stage-item.completed {
+            border-color: rgba(46, 204, 113, 0.3);
+        }
+
+        .stage-icon {
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.1);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+            font-size: 0.8rem;
+            transition: all 0.3s ease;
+        }
+
+        .stage-item.active .stage-icon {
+            background: var(--primary);
+            box-shadow: 0 0 10px var(--primary);
+            animation: pulse 1.5s infinite;
+        }
+
+        .stage-item.completed .stage-icon {
+            background: var(--success);
+            color: white;
+        }
+
+        .stage-item.failed .stage-icon {
+            background: var(--error);
+            color: white;
+        }
+
+        .stage-content {
+            flex: 1;
+        }
+
+        .stage-name {
+            font-size: 0.95rem;
+            font-weight: 500;
+            margin-bottom: 2px;
+        }
+
+        .stage-info {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+        }
+
+        /* Progress Bar */
+        .progress-container {
+            height: 6px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 3px;
+            margin-top: 8px;
+            overflow: hidden;
+            display: none;
+        }
+
+        .progress-bar {
+            height: 100%;
+            background: var(--primary);
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+
+        .progress-text {
+            display: block;
+            margin-top: 4px;
+            font-size: 0.7rem;
+            color: var(--primary);
+        }
+
+        /* Final Link */
+        #downloadArea {
+            display: none;
+            margin-top: 20px;
+            padding-top: 20px;
+            border-top: 1px solid var(--border);
+            text-align: center;
+        }
+
+        .download-btn {
+            background: var(--success);
+            box-shadow: 0 4px 15px rgba(46, 204, 113, 0.3);
+        }
+
+        .download-btn:hover {
+            box-shadow: 0 6px 20px rgba(46, 204, 113, 0.4);
+        }
+
+        @keyframes pulse {
+            0% {
+                transform: scale(1);
+            }
+
+            50% {
+                transform: scale(1.1);
+                opacity: 0.8;
+            }
+
+            100% {
+                transform: scale(1);
+            }
+        }
+
+        .spinner {
+            width: 16px;
+            height: 16px;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-top-color: #fff;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        #error-message {
+            display: none;
+            background: rgba(231, 76, 60, 0.1);
+            border-left: 4px solid var(--error);
+            padding: 12px;
+            margin-top: 16px;
+            border-radius: 4px;
+            color: #ff9999;
+            font-size: 0.85rem;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="card">
+        <h1>
+            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none"
+                stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                <polyline points="7 10 12 15 17 10"></polyline>
+                <line x1="12" y1="15" x2="12" y2="3"></line>
+            </svg>
+            Batch Processor
+        </h1>
+        <div class="description" id="batchIdDesc">Select a batch record to begin.</div>
+
+        <button id="startBtn" disabled>
+            Process Batch
+        </button>
+
+        <div id="error-message"></div>
+
+        <div class="stages-container" id="stagesContainer">
+            <!-- Stage 1 -->
+            <div class="stage-item" id="stage-locating">
+                <div class="stage-icon">1</div>
+                <div class="stage-content">
+                    <div class="stage-name">Locating Batch Record</div>
+                    <div class="stage-info">Finding record in database...</div>
+                </div>
+            </div>
+            <!-- Stage 2 -->
+            <div class="stage-item" id="stage-searching">
+                <div class="stage-icon">2</div>
+                <div class="stage-content">
+                    <div class="stage-name">Searching Plate Orders</div>
+                    <div class="stage-info">Scanning for linked plates...</div>
+                </div>
+            </div>
+            <!-- Stage 3 -->
+            <div class="stage-item" id="stage-downloading">
+                <div class="stage-icon">3</div>
+                <div class="stage-content">
+                    <div class="stage-name">Downloading Attachments</div>
+                    <div class="stage-info" id="downloadInfo">Waiting...</div>
+                    <div class="progress-container" id="progressContainer">
+                        <div class="progress-bar" id="progressBar"></div>
+                    </div>
+                    <span class="progress-text" id="progressText"></span>
+                </div>
+            </div>
+            <!-- Stage 4 -->
+            <div class="stage-item" id="stage-zipping">
+                <div class="stage-icon">4</div>
+                <div class="stage-content">
+                    <div class="stage-name">Packaging Files</div>
+                    <div class="stage-info">Creating ZIP archive...</div>
+                </div>
+            </div>
+            <!-- Stage 5 -->
+            <div class="stage-item" id="stage-uploading">
+                <div class="stage-icon">5</div>
+                <div class="stage-content">
+                    <div class="stage-name">Uploading to Cloud</div>
+                    <div class="stage-info">Sending to S3 storage...</div>
+                </div>
+            </div>
+            <!-- Stage 6 -->
+            <div class="stage-item" id="stage-saving">
+                <div class="stage-icon">6</div>
+                <div class="stage-content">
+                    <div class="stage-name">Updating Grist</div>
+                    <div class="stage-info">Saving link to record...</div>
+                </div>
+            </div>
+        </div>
+
+        <div id="downloadArea">
+            <button class="download-btn" id="finishBtn">
+                Download ZIP
+            </button>
+        </div>
+    </div>
+
+    <script>
+        const SERVER_URL = "https://custom-widgets-proxy-production.up.railway.app";
+        let currentPlatesOrderId = null;
+        let isProcessing = false;
+
+        grist.ready({
+            columns: [{ name: 'Plates_Order_ID', title: 'Batch ID', type: 'Text' }]
+        });
+
+        grist.onRecord((record, mappings) => {
+            if (isProcessing) return;
+
+            const platesOrderId = record[mappings.Plates_Order_ID || 'Plates_Order_ID'];
+            const desc = document.getElementById('batchIdDesc');
+            const startBtn = document.getElementById('startBtn');
+
+            if (platesOrderId) {
+                currentPlatesOrderId = platesOrderId;
+                desc.innerText = `Batch ID: ${platesOrderId}`;
+                startBtn.disabled = false;
+            } else {
+                currentPlatesOrderId = null;
+                desc.innerText = "Please map the 'Batch ID' column or select a valid record.";
+                startBtn.disabled = true;
+            }
+        });
+
+        const stages = {
+            "Locating Batch Record": document.getElementById('stage-locating'),
+            "Searching Plate Order Records": document.getElementById('stage-searching'),
+            "Downloading Attachments": document.getElementById('stage-downloading'),
+            "Zipping Folder": document.getElementById('stage-zipping'),
+            "Uploading to S3": document.getElementById('stage-uploading'),
+            "Saving Link to Grist": document.getElementById('stage-saving')
+        };
+
+        function resetStages() {
+            Object.values(stages).forEach(el => {
+                el.className = 'stage-item';
+                el.querySelector('.stage-icon').innerText = el.querySelector('.stage-icon').getAttribute('data-original-text') || el.querySelector('.stage-icon').innerText;
+            });
+            document.getElementById('progressContainer').style.display = 'none';
+            document.getElementById('progressText').innerText = '';
+            document.getElementById('downloadArea').style.display = 'none';
+            document.getElementById('error-message').style.display = 'none';
+        }
+
+        // Save original text for icons
+        Object.values(stages).forEach(el => {
+            el.querySelector('.stage-icon').setAttribute('data-original-text', el.querySelector('.stage-icon').innerText);
+        });
+
+        document.getElementById('startBtn').onclick = async () => {
+            if (!currentPlatesOrderId || isProcessing) return;
+
+            isProcessing = true;
+            document.getElementById('startBtn').disabled = true;
+            document.getElementById('startBtn').innerHTML = '<div class="spinner"></div> Processing...';
+            document.getElementById('stagesContainer').style.display = 'flex';
+            resetStages();
+
+            try {
+                const response = await fetch(`${SERVER_URL}/plate-orders-batch-link`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ Plates_Order_ID: currentPlatesOrderId })
+                });
+
+                if (!response.ok) throw new Error(`Server returned ${response.status}`);
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let accumulatedData = "";
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    accumulatedData += decoder.decode(value, { stream: true });
+                    const lines = accumulatedData.split('\n\n');
+                    accumulatedData = lines.pop(); // Keep last incomplete chunk
+
+                    for (const line of lines) {
+                        if (line.startsWith('data: ')) {
+                            try {
+                                const data = JSON.parse(line.substring(6));
+                                handleEvent(data);
+                            } catch (e) {
+                                console.error("Failed to parse SSE line", line, e);
+                            }
+                        }
+                    }
+                }
+            } catch (err) {
+                console.error(err);
+                showError(err.message);
+            } finally {
+                isProcessing = false;
+                document.getElementById('startBtn').disabled = false;
+                document.getElementById('startBtn').innerHTML = 'Process Batch';
+            }
+        };
+
+        function handleEvent(data) {
+            console.log("Event:", data);
+            const stageEl = stages[data.stage];
+
+            if (data.status === 'started') {
+                if (stageEl) {
+                    stageEl.classList.add('active');
+                    stageEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }
+                if (data.stage === 'Downloading Attachments') {
+                    document.getElementById('progressContainer').style.display = 'block';
+                    document.getElementById('downloadInfo').innerText = `Starting downloads... Total: ${data.total || '?'}`;
+                }
+            } else if (data.status === 'progress') {
+                if (data.stage === 'Downloading Attachments') {
+                    const bar = document.getElementById('progressBar');
+                    const text = document.getElementById('progressText');
+                    bar.style.width = `${data.progress}%`;
+                    text.innerText = `${data.progress}% - ${data.current || ''}`;
+                    document.getElementById('downloadInfo').innerText = `Downloading files... (${data.progress}%)`;
+                }
+            } else if (data.status === 'completed') {
+                if (stageEl) {
+                    stageEl.classList.remove('active');
+                    stageEl.classList.add('completed');
+                    stageEl.querySelector('.stage-icon').innerHTML = '✓';
+                }
+                if (data.stage === 'Downloading Attachments') {
+                    document.getElementById('downloadInfo').innerText = 'All files downloaded.';
+                }
+                if (data.stage === 'Searching Plate Order Records') {
+                    stageEl.querySelector('.stage-info').innerText = `Found ${data.count} records.`;
+                }
+            } else if (data.status === 'success') {
+                document.getElementById('downloadArea').style.display = 'block';
+                document.getElementById('finishBtn').onclick = () => {
+                    window.open(data.url, '_blank');
+                };
+                // Mark all as completed just in case
+                Object.values(stages).forEach(el => {
+                    if (!el.classList.contains('completed')) {
+                        el.classList.add('completed');
+                        el.querySelector('.stage-icon').innerHTML = '✓';
+                    }
+                });
+            } else if (data.status === 'failed') {
+                if (stageEl) {
+                    stageEl.classList.remove('active');
+                    stageEl.classList.add('failed');
+                    stageEl.querySelector('.stage-icon').innerHTML = '✕';
+                }
+                showError(data.message || "An error occurred during processing.");
+            }
+        }
+
+        function showError(msg) {
+            const errEl = document.getElementById('error-message');
+            errEl.innerText = `Error: ${msg}`;
+            errEl.style.display = 'block';
+            errEl.scrollIntoView({ behavior: 'smooth' });
+        }
+    </script>
+
+</body>
+
+</html>
