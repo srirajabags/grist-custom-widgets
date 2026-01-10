@@ -330,6 +330,10 @@
                         <div class="stage-time"></div>
                     </div>
                     <div class="stage-info">Creating ZIP archive...</div>
+                    <div class="progress-container" id="zipProgressContainer">
+                        <div class="progress-bar" id="zipProgressBar"></div>
+                    </div>
+                    <span class="progress-text" id="zipProgressText"></span>
                 </div>
             </div>
             <!-- Stage 5 -->
@@ -409,6 +413,8 @@
             });
             document.getElementById('progressContainer').style.display = 'none';
             document.getElementById('progressText').innerText = '';
+            document.getElementById('zipProgressContainer').style.display = 'none';
+            document.getElementById('zipProgressText').innerText = '';
             document.getElementById('downloadArea').style.display = 'none';
             document.getElementById('error-message').style.display = 'none';
 
@@ -494,6 +500,9 @@
                     document.getElementById('progressContainer').style.display = 'block';
                     document.getElementById('downloadInfo').innerText = `Starting downloads... Total: ${data.total || '?'}`;
                 }
+                if (data.stage === 'Zipping Folder') {
+                    document.getElementById('zipProgressContainer').style.display = 'block';
+                }
             } else if (data.status === 'progress') {
                 if (data.stage === 'Downloading Attachments') {
                     const bar = document.getElementById('progressBar');
@@ -501,6 +510,13 @@
                     bar.style.width = `${data.progress}%`;
                     text.innerText = `${data.progress}% - ${data.current || ''}`;
                     document.getElementById('downloadInfo').innerText = `Downloading files... (${data.progress}%)`;
+                }
+                if (data.stage === 'Zipping Folder') {
+                    const bar = document.getElementById('zipProgressBar');
+                    const text = document.getElementById('zipProgressText');
+                    document.getElementById('zipProgressContainer').style.display = 'block';
+                    bar.style.width = `${data.progress}%`;
+                    text.innerText = `${data.progress}% - ${data.current || ''}`;
                 }
             } else if (data.status === 'completed') {
                 if (stageEl) {
