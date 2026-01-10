@@ -150,17 +150,32 @@
 
         .stage-content {
             flex: 1;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .stage-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            width: 100%;
         }
 
         .stage-name {
             font-size: 0.95rem;
             font-weight: 500;
-            margin-bottom: 2px;
+        }
+
+        .stage-time {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            font-variant-numeric: tabular-nums;
         }
 
         .stage-info {
             font-size: 0.75rem;
             color: var(--text-muted);
+            margin-top: 2px;
         }
 
         /* Progress Bar */
@@ -258,7 +273,7 @@
                 <polyline points="7 10 12 15 17 10"></polyline>
                 <line x1="12" y1="15" x2="12" y2="3"></line>
             </svg>
-            Batch Processor
+            TIFF Files Download Link Generator
         </h1>
         <div class="description" id="batchIdDesc">Select a batch record to begin.</div>
 
@@ -273,7 +288,10 @@
             <div class="stage-item" id="stage-locating">
                 <div class="stage-icon">1</div>
                 <div class="stage-content">
-                    <div class="stage-name">Locating Batch Record</div>
+                    <div class="stage-header">
+                        <div class="stage-name">Locating Batch Record</div>
+                        <div class="stage-time"></div>
+                    </div>
                     <div class="stage-info">Finding record in database...</div>
                 </div>
             </div>
@@ -281,7 +299,10 @@
             <div class="stage-item" id="stage-searching">
                 <div class="stage-icon">2</div>
                 <div class="stage-content">
-                    <div class="stage-name">Searching Plate Orders</div>
+                    <div class="stage-header">
+                        <div class="stage-name">Searching Plate Orders</div>
+                        <div class="stage-time"></div>
+                    </div>
                     <div class="stage-info">Scanning for linked plates...</div>
                 </div>
             </div>
@@ -289,7 +310,10 @@
             <div class="stage-item" id="stage-downloading">
                 <div class="stage-icon">3</div>
                 <div class="stage-content">
-                    <div class="stage-name">Downloading Attachments</div>
+                    <div class="stage-header">
+                        <div class="stage-name">Downloading Attachments</div>
+                        <div class="stage-time"></div>
+                    </div>
                     <div class="stage-info" id="downloadInfo">Waiting...</div>
                     <div class="progress-container" id="progressContainer">
                         <div class="progress-bar" id="progressBar"></div>
@@ -301,7 +325,10 @@
             <div class="stage-item" id="stage-zipping">
                 <div class="stage-icon">4</div>
                 <div class="stage-content">
-                    <div class="stage-name">Packaging Files</div>
+                    <div class="stage-header">
+                        <div class="stage-name">Packaging Files</div>
+                        <div class="stage-time"></div>
+                    </div>
                     <div class="stage-info">Creating ZIP archive...</div>
                 </div>
             </div>
@@ -309,7 +336,10 @@
             <div class="stage-item" id="stage-uploading">
                 <div class="stage-icon">5</div>
                 <div class="stage-content">
-                    <div class="stage-name">Uploading to Cloud</div>
+                    <div class="stage-header">
+                        <div class="stage-name">Uploading to Cloud</div>
+                        <div class="stage-time"></div>
+                    </div>
                     <div class="stage-info">Sending to S3 storage...</div>
                 </div>
             </div>
@@ -317,7 +347,10 @@
             <div class="stage-item" id="stage-saving">
                 <div class="stage-icon">6</div>
                 <div class="stage-content">
-                    <div class="stage-name">Updating Grist</div>
+                    <div class="stage-header">
+                        <div class="stage-name">Updating Grist</div>
+                        <div class="stage-time"></div>
+                    </div>
                     <div class="stage-info">Saving link to record...</div>
                 </div>
             </div>
@@ -366,21 +399,32 @@
             "Saving Link to Grist": document.getElementById('stage-saving')
         };
 
+        const stageTimes = {};
+
         function resetStages() {
             Object.values(stages).forEach(el => {
                 el.className = 'stage-item';
                 el.querySelector('.stage-icon').innerText = el.querySelector('.stage-icon').getAttribute('data-original-text') || el.querySelector('.stage-icon').innerText;
+                el.querySelector('.stage-time').innerText = '';
             });
             document.getElementById('progressContainer').style.display = 'none';
             document.getElementById('progressText').innerText = '';
             document.getElementById('downloadArea').style.display = 'none';
             document.getElementById('error-message').style.display = 'none';
+
+            // Clear times
+            Object.keys(stages).forEach(key => stageTimes[key] = { start: null, end: null });
         }
 
         // Save original text for icons
         Object.values(stages).forEach(el => {
             el.querySelector('.stage-icon').setAttribute('data-original-text', el.querySelector('.stage-icon').innerText);
         });
+
+        function formatTime(date) {
+            if (!date) return "";
+            return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+        }
 
         document.getElementById('startBtn').onclick = async () => {
             if (!currentPlatesOrderId || isProcessing) return;
@@ -436,11 +480,15 @@
         function handleEvent(data) {
             console.log("Event:", data);
             const stageEl = stages[data.stage];
+            const now = new Date();
 
             if (data.status === 'started') {
                 if (stageEl) {
                     stageEl.classList.add('active');
                     stageEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+                    stageTimes[data.stage].start = now;
+                    stageEl.querySelector('.stage-time').innerText = `${formatTime(now)} - ...`;
                 }
                 if (data.stage === 'Downloading Attachments') {
                     document.getElementById('progressContainer').style.display = 'block';
@@ -459,6 +507,10 @@
                     stageEl.classList.remove('active');
                     stageEl.classList.add('completed');
                     stageEl.querySelector('.stage-icon').innerHTML = '✓';
+
+                    stageTimes[data.stage].end = now;
+                    const startTime = stageTimes[data.stage].start;
+                    stageEl.querySelector('.stage-time').innerText = `${formatTime(startTime)} - ${formatTime(now)}`;
                 }
                 if (data.stage === 'Downloading Attachments') {
                     document.getElementById('downloadInfo').innerText = 'All files downloaded.';
@@ -472,10 +524,15 @@
                     window.open(data.url, '_blank');
                 };
                 // Mark all as completed just in case
-                Object.values(stages).forEach(el => {
+                Object.keys(stages).forEach(key => {
+                    const el = stages[key];
                     if (!el.classList.contains('completed')) {
                         el.classList.add('completed');
                         el.querySelector('.stage-icon').innerHTML = '✓';
+                        if (stageTimes[key].start && !stageTimes[key].end) {
+                            stageTimes[key].end = now;
+                            el.querySelector('.stage-time').innerText = `${formatTime(stageTimes[key].start)} - ${formatTime(now)}`;
+                        }
                     }
                 });
             } else if (data.status === 'failed') {
@@ -483,6 +540,9 @@
                     stageEl.classList.remove('active');
                     stageEl.classList.add('failed');
                     stageEl.querySelector('.stage-icon').innerHTML = '✕';
+                    if (stageTimes[data.stage].start) {
+                        stageEl.querySelector('.stage-time').innerText = `${formatTime(stageTimes[data.stage].start)} - Failed`;
+                    }
                 }
                 showError(data.message || "An error occurred during processing.");
             }
