@@ -280,6 +280,20 @@ Bun.serve({
 
                             output.on("close", resolve);
                             archive.on("error", reject);
+                            archive.on("progress", (progress) => {
+                                // const total = progress.entries.total || 0;
+                                const total = plates.length;
+                                const processed = (progress.entries.processed || 0) + 1;
+                                if (total > 0) {
+                                    const percent = Math.round((processed / total) * 100);
+                                    send({
+                                        stage: "Zipping Folder",
+                                        status: "progress",
+                                        progress: percent,
+                                        current: `${processed} / ${total} files`
+                                    });
+                                }
+                            });
 
                             archive.pipe(output);
                             archive.directory(tmpDir, false);
