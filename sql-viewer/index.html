@@ -181,6 +181,43 @@
             margin-left: auto;
         }
 
+        .apikey-row {
+            display: none;
+            margin-top: 12px;
+        }
+
+        .apikey-row.visible {
+            display: block;
+        }
+
+        .apikey-row input {
+            width: 100%;
+            background: rgba(0, 0, 0, 0.4);
+            color: var(--text-main);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 10px 12px;
+            font-family: 'SF Mono', Menlo, Consolas, monospace;
+            font-size: 0.8rem;
+            outline: none;
+            transition: border-color 0.3s ease;
+        }
+
+        .apikey-row input:focus {
+            border-color: var(--primary);
+        }
+
+        .apikey-note {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            margin-top: 6px;
+        }
+
+        #keyBtn.active {
+            border-color: var(--success);
+            color: var(--success);
+        }
+
         #error-message {
             display: none;
             background: rgba(231, 76, 60, 0.1);
@@ -305,7 +342,16 @@
                 <button id="runBtn">Run Query</button>
                 <button id="tablesBtn" class="secondary">List Tables</button>
                 <button id="csvBtn" class="secondary" disabled>Export CSV</button>
+                <button id="keyBtn" class="secondary">API Key</button>
                 <span class="hint">Ctrl/⌘ + Enter to run</span>
+            </div>
+
+            <div class="apikey-row" id="apikeyRow">
+                <input type="password" id="apikeyInput" placeholder="Paste your Grist API key (Profile Settings → API Key)" autocomplete="off">
+                <div class="apikey-note">
+                    Needed when the document has Access Rules — the widget's own token is then rejected by the /sql
+                    endpoint. The key is stored only in this browser (localStorage), never in the document.
+                </div>
             </div>
 
             <div id="error-message"></div>
@@ -320,8 +366,13 @@
     <script>
         const MAX_RENDER_ROWS = 2000;
 
+        const API_KEY_STORAGE = 'sql-viewer-api-key';
+
         const card = document.getElementById('editorCard');
         const collapseBtn = document.getElementById('collapseBtn');
+        const keyBtn = document.getElementById('keyBtn');
+        const apikeyRow = document.getElementById('apikeyRow');
+        const apikeyInput = document.getElementById('apikeyInput');
         const sqlInput = document.getElementById('sql');
         const runBtn = document.getElementById('runBtn');
         const tablesBtn = document.getElementById('tablesBtn');
@@ -359,6 +410,42 @@
             setCollapsed(collapsed);
             grist.setOption('collapsed', collapsed).catch(err => console.warn('Could not save collapsed state', err));
         };
+
+        // Optional API key (kept in this browser only) for docs with Access Rules,
+        // where the widget access token is rejected by the /sql endpoint.
+        function getApiKey() {
+            try {
+                return localStorage.getItem(API_KEY_STORAGE) || '';
+            } catch (e) {
+                return '';
+            }
+        }
+
+        function refreshKeyBtn() {
+            keyBtn.classList.toggle('active', !!getApiKey());
+        }
+
+        apikeyInput.value = getApiKey();
+        refreshKeyBtn();
+
+        keyBtn.onclick = () => {
+            apikeyRow.classList.toggle('visible');
+            if (apikeyRow.classList.contains('visible')) apikeyInput.focus();
+        };
+
+        apikeyInput.addEventListener('input', () => {
+            try {
+                const value = apikeyInput.value.trim();
+                if (value) {
+                    localStorage.setItem(API_KEY_STORAGE, value);
+                } else {
+                    localStorage.removeItem(API_KEY_STORAGE);
+                }
+            } catch (e) {
+                console.warn('Could not persist API key', e);
+            }
+            refreshKeyBtn();
+        });
 
         async function getToken() {
             if (cachedToken && Date.now() < cachedToken.expiresAt) {
@@ -479,15 +566,28 @@
 
             try {
                 const { token, baseUrl } = await getToken();
-                const response = await fetch(`${baseUrl}/sql?auth=${encodeURIComponent(token)}`, {
+                const apiKey = getApiKey();
+                // With an API key, authenticate as the user directly (works even when
+                // Access Rules make the /sql endpoint reject widget access tokens).
+                const url = apiKey ? `${baseUrl}/sql` : `${baseUrl}/sql?auth=${encodeURIComponent(token)}`;
+                const headers = { 'Content-Type': 'application/json' };
+                if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+
+                const response = await fetch(url, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers,
                     body: JSON.stringify({ sql, timeout: 1000 }),
                 });
 
                 const data = await response.json();
                 if (!response.ok) {
-                    throw new Error(data.error || `Server returned ${response.status}`);
+                    let message = data.error || `Server returned ${response.status}`;
+                    if (/insufficient document access/i.test(message) && !apiKey) {
+                        message += '\nThis document has Access Rules, which make the /sql endpoint reject ' +
+                            'widget tokens. Click "API Key" and paste your Grist API key to query directly.';
+                        apikeyRow.classList.add('visible');
+                    }
+                    throw new Error(message);
                 }
 
                 const elapsed = Math.round(performance.now() - started);
