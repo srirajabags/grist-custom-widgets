@@ -345,6 +345,10 @@
                         <div class="stage-time"></div>
                     </div>
                     <div class="stage-info">Sending to S3 storage...</div>
+                    <div class="progress-container" id="uploadProgressContainer">
+                        <div class="progress-bar" id="uploadProgressBar"></div>
+                    </div>
+                    <span class="progress-text" id="uploadProgressText"></span>
                 </div>
             </div>
             <!-- Stage 6 -->
@@ -415,6 +419,9 @@
             document.getElementById('progressText').innerText = '';
             document.getElementById('zipProgressContainer').style.display = 'none';
             document.getElementById('zipProgressText').innerText = '';
+            document.getElementById('uploadProgressContainer').style.display = 'none';
+            document.getElementById('uploadProgressBar').style.width = '0%';
+            document.getElementById('uploadProgressText').innerText = '';
             document.getElementById('downloadArea').style.display = 'none';
             document.getElementById('error-message').style.display = 'none';
 
@@ -503,6 +510,9 @@
                 if (data.stage === 'Zipping Folder') {
                     document.getElementById('zipProgressContainer').style.display = 'block';
                 }
+                if (data.stage === 'Uploading to S3') {
+                    document.getElementById('uploadProgressContainer').style.display = 'block';
+                }
             } else if (data.status === 'progress') {
                 if (data.stage === 'Downloading Attachments') {
                     const bar = document.getElementById('progressBar');
@@ -517,6 +527,11 @@
                     document.getElementById('zipProgressContainer').style.display = 'block';
                     bar.style.width = `${data.progress}%`;
                     text.innerText = `${data.progress}% - ${data.current || ''}`;
+                }
+                if (data.stage === 'Uploading to S3') {
+                    document.getElementById('uploadProgressContainer').style.display = 'block';
+                    document.getElementById('uploadProgressBar').style.width = `${data.progress}%`;
+                    document.getElementById('uploadProgressText').innerText = `${data.progress}% - ${data.current || ''}`;
                 }
             } else if (data.status === 'completed') {
                 if (stageEl) {

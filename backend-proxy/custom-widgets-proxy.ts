@@ -4,7 +4,7 @@ import {
 } from "@aws-sdk/client-s3";
 import { Upload } from "@aws-sdk/lib-storage";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
-import { mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdir, writeFile, rm, stat } from "node:fs/promises";
 import { createReadStream, createWriteStream } from "node:fs";
 import path from "node:path";
 import archiver from "archiver@7.0.1";
@@ -400,9 +400,12 @@ Bun.serve({
               process.env.S3_PREFIX || "tiff-files"
             }/${platesOrderId}.zip`;
 
+            const zipSize = (await stat(zipPath)).size;
+            const toGB = (bytes: number) => (bytes / 1024 ** 3).toFixed(2);
+
             // Stream as a multipart upload: a single PutObject of the whole
             // ZIP in memory fails once the ZIP exceeds ~2 GiB, and caps at 5 GB
-            await new Upload({
+            const upload = new Upload({
               client: s3Client,
               params: {
                 Bucket: S3_BUCKET,
@@ -412,7 +415,16 @@ Bun.serve({
               },
               partSize: 64 * 1024 * 1024,
               queueSize: 4,
-            }).done();
+            });
+            upload.on("httpUploadProgress", ({ loaded = 0 }) => {
+              send({
+                stage: "Uploading to S3",
+                status: "progress",
+                progress: Math.min(100, Math.round((loaded / zipSize) * 100)),
+                current: `${toGB(loaded)} / ${toGB(zipSize)} GB`,
+              });
+            });
+            await upload.done();
             console.log(`[DEBUG] Upload successful for key: ${s3Key}`);
 
             const presignedUrl = await getSignedUrl(
