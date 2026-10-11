@@ -536,17 +536,20 @@
       return { blob: await placeholderJpeg(file.name), kind: 'placeholder (no WorkDrive preview)' };
     }
 
+    // Uploads with the viewer's own Grist session, as Grist's UI does. An access
+    // token (?auth=) makes the request run as the anonymous user, and Grist
+    // 1.7.21 fails attachment uploads that way (500). This page and Grist are the
+    // same site and Grist trusts this origin with credentials, so the session
+    // cookie goes along. X-Requested-With satisfies Grist's CSRF check.
     async function gristAttach(blob, name) {
-      const { token, baseUrl } = await grist.docApi.getAccessToken({ readOnly: false });
+      const { baseUrl } = await grist.docApi.getAccessToken({ readOnly: true });
       const form = new FormData();
       form.append('upload', blob, name);
-      // Writes made with an access token must carry X-Requested-With (Grist's
-      // CSRF check); without it Grist answers 401 before adding CORS headers,
-      // which the browser reports only as "Failed to fetch".
-      const res = await fetch(`${baseUrl}/attachments?auth=${encodeURIComponent(token)}`, {
-        method: 'POST', body: form, headers: { 'X-Requested-With': 'XMLHttpRequest' },
+      const res = await fetch(`${baseUrl}/attachments`, {
+        method: 'POST', body: form, credentials: 'include',
+        headers: { 'X-Requested-With': 'XMLHttpRequest' },
       });
-      if (!res.ok) throw new Error(`Grist attachment upload ${res.status}`);
+      if (!res.ok) throw new Error(`Grist attachment upload ${res.status}: ${(await res.text()).slice(0, 200)}`);
       return (await res.json())[0];
     }
 
