@@ -67,11 +67,11 @@
     const ZOHO_AUTH_URL = 'https://accounts.zoho.in/oauth/v2/auth';
     const ZOHO_SCOPE = 'WorkDrive.files.READ';
     const REDIRECT_URI = new URL('callback.html', location.href).href;
-    const WD_API = 'https://www.zohoapis.in/workdrive/api/v1';
-    // Used when the browser can't call WorkDrive directly (CORS). Carries small
-    // JSON calls and preview images only; original files never go through it.
-    // TODO before staff use: replace with the narrow route in custom-widgets-proxy (W9).
-    const RELAY = 'https://cors-anywhere-production-b91c.up.railway.app/';
+    // WorkDrive read relay in custom-widgets-proxy: browsers can't call
+    // WorkDrive directly (no CORS), and its preview server rejects requests
+    // from this site. Carries small JSON calls and preview images only;
+    // original files open in WorkDrive itself.
+    const WD_RELAY = 'https://custom-widgets-proxy-production.up.railway.app/wd';
     const ARCHIVE_TABLE = 'Archived_Files';
     const TOKEN_KEY = 'archivedDesign.token';
     const HANDOVER_KEY = 'archivedDesign.handover';
@@ -171,42 +171,26 @@
     // --- API calls ---
     class SignedOut extends Error {}
 
-    // WorkDrive checks the caller's origin against the app's registered
-    // JavaScript domains, so a direct call may work; fall back to the relay
-    // (per host) when the browser blocks it.
-    const viaRelay = new Map(); // host -> true/false once known
-
-    async function wdFetch(url, headers) {
-      const host = new URL(url).host;
-      if (viaRelay.get(host) !== true) {
-        try {
-          const res = await fetch(url, { headers });
-          viaRelay.set(host, false);
-          return res;
-        } catch (err) {
-          if (viaRelay.get(host) === false) throw err;
-          viaRelay.set(host, true);
-        }
-      }
-      return fetch(RELAY + url, { headers });
-    }
-
-    async function wd(path) {
+    async function wdRelay(path, accept) {
       const token = readToken();
       if (!token) throw new SignedOut();
-      const res = await wdFetch(WD_API + path, {
-        Authorization: `Zoho-oauthtoken ${token}`, Accept: 'application/vnd.api+json',
+      const res = await fetch(WD_RELAY + path, {
+        headers: { Authorization: `Zoho-oauthtoken ${token}`, Accept: accept },
       });
-      if (res.status === 401) { try { localStorage.removeItem(TOKEN_KEY); } catch (e) {} throw new SignedOut(); }
-      if (!res.ok) throw new Error(`WorkDrive ${res.status}`);
-      return res.json();
+      if (res.ok) return res;
+      // WorkDrive answers an invalid or revoked token with 500 + F7003, not 401.
+      const body = await res.text();
+      if (res.status === 401 || body.includes('F7003')) {
+        try { localStorage.removeItem(TOKEN_KEY); } catch (e) {}
+        throw new SignedOut();
+      }
+      throw new Error(`WorkDrive ${res.status}`);
     }
+
+    const wd = async (path) => (await wdRelay(path, 'application/vnd.api+json')).json();
 
     async function wdImage(url) {
-      const token = readToken();
-      if (!token) throw new SignedOut();
-      const res = await wdFetch(url, { Authorization: `Zoho-oauthtoken ${token}` });
-      if (!res.ok) throw new Error(`Preview ${res.status}`);
+      const res = await wdRelay(`/preview?url=${encodeURIComponent(url)}`, 'image/*');
       return URL.createObjectURL(await res.blob());
     }
 
@@ -346,8 +330,8 @@
         ui.caption.replaceChildren('Thumbnail stored in Grist (800 px). WorkDrive has no preview for this file.');
         return;
       }
-      const src = await largePreview(p.preview_data_url);
-      if (stale()) { if (src.startsWith('blob:')) URL.revokeObjectURL(src); return; }
+      const src = await wdImage(p.preview_data_url).catch(() => '');
+      if (stale()) { if (src) URL.revokeObjectURL(src); return; }
       if (src) {
         ui.img.src = src;
         ui.caption.replaceChildren('WorkDrive preview · ', openFull);
@@ -356,23 +340,6 @@
       }
     }
 
-    // The preview server can't take the token in a header from a browser (CORS),
-    // and rejects relayed requests that carry this site's origin. So: first let
-    // the browser load it with its own WorkDrive session, if it has one; then
-    // try the token through the relay; otherwise give up quietly.
-    function loadsAsImage(url) {
-      return new Promise((resolve) => {
-        const probe = new Image();
-        probe.onload = () => resolve(probe.naturalWidth > 0);
-        probe.onerror = () => resolve(false);
-        probe.src = url;
-      });
-    }
-
-    async function largePreview(url) {
-      if (await loadsAsImage(url)) return url;
-      try { return await wdImage(url); } catch (err) { return ''; }
-    }
 
     grist.onRecord((record) => {
       current = grist.mapColumnNames(record) || undefined;
