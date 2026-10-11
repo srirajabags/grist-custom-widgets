@@ -337,17 +337,41 @@
       if (download) ui.actions.append(el('a', { class: 'btn', href: download, target: '_blank', rel: 'noopener' }, 'Download original'));
 
       // WorkDrive only renders previews for files up to 250 MB; larger ones
-      // keep the Grist thumbnail.
+      // keep the Grist thumbnail. A failed preview is not an error: the
+      // thumbnail stays and WorkDrive's own viewer is one click away.
       const p = preview?.data?.attributes;
-      if (p?.preview_data_url && p.preview_status === 1) {
-        const src = await wdImage(p.preview_data_url);
-        if (stale()) { URL.revokeObjectURL(src); return; }
-        ui.img.src = src;
-        ui.caption.replaceChildren('WorkDrive preview · ',
-          el('a', { href: p.preview_url, target: '_blank', rel: 'noopener' }, 'open full size'));
-      } else {
-        ui.caption.textContent = 'Thumbnail stored in Grist (800 px). WorkDrive has no preview for this file.';
+      const openFull = p?.preview_url
+        && el('a', { href: p.preview_url, target: '_blank', rel: 'noopener' }, 'open preview in WorkDrive');
+      if (!(p?.preview_data_url && p.preview_status === 1)) {
+        ui.caption.replaceChildren('Thumbnail stored in Grist (800 px). WorkDrive has no preview for this file.');
+        return;
       }
+      const src = await largePreview(p.preview_data_url);
+      if (stale()) { if (src.startsWith('blob:')) URL.revokeObjectURL(src); return; }
+      if (src) {
+        ui.img.src = src;
+        ui.caption.replaceChildren('WorkDrive preview · ', openFull);
+      } else {
+        ui.caption.replaceChildren('Thumbnail stored in Grist (800 px) · ', openFull);
+      }
+    }
+
+    // The preview server can't take the token in a header from a browser (CORS),
+    // and rejects relayed requests that carry this site's origin. So: first let
+    // the browser load it with its own WorkDrive session, if it has one; then
+    // try the token through the relay; otherwise give up quietly.
+    function loadsAsImage(url) {
+      return new Promise((resolve) => {
+        const probe = new Image();
+        probe.onload = () => resolve(probe.naturalWidth > 0);
+        probe.onerror = () => resolve(false);
+        probe.src = url;
+      });
+    }
+
+    async function largePreview(url) {
+      if (await loadsAsImage(url)) return url;
+      try { return await wdImage(url); } catch (err) { return ''; }
     }
 
     grist.onRecord((record) => {
