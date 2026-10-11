@@ -348,7 +348,8 @@
       const caption = el('div', { class: 'caption' }, 'Thumbnail stored in Grist (800 px)');
       const details = el('div');
       const actions = el('div', { class: 'actions' },
-        row.WD_Permalink && el('a', { class: 'btn primary', href: row.WD_Permalink, target: '_blank', rel: 'noopener' }, 'Open in WorkDrive'));
+        row.WD_Permalink && el('a', { class: 'btn primary', href: row.WD_Permalink, target: '_blank', rel: 'noopener' }, 'Open in WorkDrive'),
+        row.WD_Folder_ID && el('a', { class: 'btn', href: `https://workdrive.zoho.in/folder/${row.WD_Folder_ID}`, target: '_blank', rel: 'noopener' }, 'Open folder'));
 
       const card = el('div', { class: 'card' },
         el('span', { class: 'badge archived' }, row.State === 'direct' ? 'Uploaded to WorkDrive' : 'Archived to WorkDrive'),
@@ -422,7 +423,7 @@
 
     let upload = null; // { ctx, steps, progress, busy } while one runs; one at a time
 
-    function streamUpload(file, name, token, onProgress) {
+    function streamUpload(file, name, token, onProgress, parentId) {
       // XMLHttpRequest, because fetch can't report upload progress. The file is
       // streamed from disk by the browser, whatever its size.
       return new Promise((resolve, reject) => {
@@ -430,7 +431,7 @@
         xhr.open('POST', WD_UPLOAD_URL);
         xhr.setRequestHeader('Authorization', `Zoho-oauthtoken ${token}`);
         xhr.setRequestHeader('x-filename', encodeURIComponent(name));
-        xhr.setRequestHeader('x-parent_id', WD_UPLOAD_FOLDER.id);
+        xhr.setRequestHeader('x-parent_id', parentId);
         xhr.setRequestHeader('upload-id', crypto.randomUUID());
         xhr.setRequestHeader('x-streammode', '1');
         xhr.setRequestHeader('Content-Type', 'application/octet-stream');
@@ -560,6 +561,56 @@
       return (Array.isArray(files) ? files : []).filter((x) => typeof x === 'number');
     }
 
+    // Compression of the first image in a classic TIFF (tag 259): 1 = none,
+    // 5 = LZW, 8 / 32946 = ZIP. Reads only the header and first directory, so it
+    // is instant whatever the file size. null = not a TIFF, or BigTIFF.
+    const TIFF_COMPRESSION = { 1: 'none', 5: 'LZW', 7: 'JPEG', 8: 'ZIP', 32946: 'ZIP', 32773: 'PackBits' };
+
+    async function tiffCompression(file) {
+      const head = new DataView(await file.slice(0, 8).arrayBuffer());
+      const order = head.getUint16(0);
+      const le = order === 0x4949;
+      if (!le && order !== 0x4d4d) return null;
+      if (head.getUint16(2, le) !== 42) return null;
+      const ifd = head.getUint32(4, le);
+      const count = new DataView(await file.slice(ifd, ifd + 2).arrayBuffer()).getUint16(0, le);
+      const entries = new DataView(await file.slice(ifd + 2, ifd + 2 + count * 12).arrayBuffer());
+      for (let i = 0; i < count; i++) {
+        if (entries.getUint16(i * 12, le) !== 259) continue;
+        const type = entries.getUint16(i * 12 + 2, le);
+        return type === 3 ? entries.getUint16(i * 12 + 8, le) : entries.getUint32(i * 12 + 8, le);
+      }
+      return 1; // no Compression tag means uncompressed
+    }
+
+    // One WorkDrive folder per design, "{Order IDs} - {Design Name}", holding the
+    // TIFF and its preview JPG (and any A/B variants uploaded for the same design).
+    const safeName = (s) => s.replace(/[\\/:*?"<>|]+/g, '-').replace(/\s+/g, ' ').trim().slice(0, 120);
+
+    function designFolderName(ctx, file) {
+      const design = fmt(ctx.record.Design_Name) || file.name.replace(/\.[^.]+$/, '');
+      return safeName([fmt(ctx.record.Order_IDs), design].filter(Boolean).join(' - '));
+    }
+
+    // Folder listing and creation accept browser calls from this site.
+    async function wdGet(path) {
+      const token = readToken();
+      if (!token) throw new SignedOut();
+      const res = await fetch(WD_API + path, { headers: { Authorization: `Zoho-oauthtoken ${token}`, Accept: 'application/vnd.api+json' } });
+      if (!res.ok) throw new Error(`WorkDrive ${res.status} ${(await res.text()).slice(0, 200)}`);
+      return res.json();
+    }
+
+    async function designFolder(name) {
+      const list = await wdGet(`/files/${WD_UPLOAD_FOLDER.id}/files?filter%5Btype%5D=folder&page%5Blimit%5D=200`);
+      const same = (list.data || []).find((f) =>
+        f.attributes.type === 'folder' && f.attributes.name.toLowerCase() === name.toLowerCase());
+      if (same) return { id: same.id, created: false };
+      const made = await wdPost('/files', { data: { type: 'files', attributes: { name, parent_id: WD_UPLOAD_FOLDER.id } } });
+      const item = Array.isArray(made.data) ? made.data[0] : made.data;
+      return { id: item.id, created: true };
+    }
+
     async function runUpload(file, ctx) {
       const step = (text, cls = '') => { upload.steps.push({ text, cls }); paintUploader(); return upload.steps.length - 1; };
       const update = (i, text, cls) => { upload.steps[i] = { text, cls }; paintUploader(); };
@@ -567,10 +618,14 @@
       window.onbeforeunload = () => 'An upload to WorkDrive is still running.';
       let fileId = null;
       try {
-        const name = `${fmt(ctx.record.Order_IDs) ? `${fmt(ctx.record.Order_IDs).replace(/[\\/:*?"<>|,\s]+/g, '-')}_` : ''}${file.name}`;
-        let i = step(`Uploading ${file.name} (${mb(file.size)}) to ${WD_UPLOAD_FOLDER.label}…`);
+        const folderName = designFolderName(ctx, file);
+        let i = step(`Finding the design folder "${folderName}"…`);
+        const folder = await designFolder(folderName);
+        update(i, `✓ ${folder.created ? 'Created' : 'Using'} folder ${WD_UPLOAD_FOLDER.label}/${folderName}`, 'done');
+
+        i = step(`Uploading ${file.name} (${mb(file.size)})…`);
         const started = Date.now();
-        const reply = await streamUpload(file, name, readToken(), (f) => { upload.progress = f; paintUploader(); });
+        const reply = await streamUpload(file, file.name, readToken(), (f) => { upload.progress = f; paintUploader(); }, folder.id);
         fileId = uploadedFileId(reply);
         update(i, `✓ Uploaded in ${Math.round((Date.now() - started) / 1000)} s`, 'done');
 
@@ -590,15 +645,30 @@
 
         i = step('Making the Grist preview…');
         const preview = await gristPreview(fileId, file, (t) => update(i, `Making the Grist preview: ${t}…`));
-        const thumbId = await gristAttach(preview.blob, `${file.name.replace(/\.[^.]+$/, '')}.workdrive.jpg`);
+        const previewName = `${file.name.replace(/\.[^.]+$/, '')}.preview.jpg`;
+        const thumbId = await gristAttach(preview.blob, previewName);
         update(i, `✓ Preview added to Grist (${preview.kind})`, 'done');
+
+        // A copy next to the TIFF in WorkDrive. Not for the placeholder, and not
+        // fatal: the TIFF and its templates are already safe.
+        let previewFileId = '';
+        if (preview.kind === 'WorkDrive preview') {
+          i = step('Saving the preview JPG in the design folder…');
+          try {
+            previewFileId = uploadedFileId(await streamUpload(preview.blob, previewName, readToken(), () => {}, folder.id));
+            update(i, `✓ ${previewName} saved next to the TIFF`, 'done');
+          } catch (err) {
+            update(i, `✗ Preview not saved in WorkDrive (${err.message}); continuing`, 'fail');
+          }
+        }
 
         i = step('Linking it to the row…');
         const now = Date.now() / 1000;
         await grist.docApi.applyUserActions([
           ['AddRecord', ARCHIVE_TABLE, null, {
             Original_Name: file.name, Size_Bytes: file.size, Thumbnail_Attachment_Id: thumbId,
-            WD_File_ID: fileId, WD_Permalink: a.permalink, WD_Folder: WD_UPLOAD_FOLDER.label,
+            WD_File_ID: fileId, WD_Permalink: a.permalink, WD_Folder: `${WD_UPLOAD_FOLDER.label}/${folderName}`,
+            WD_Folder_ID: folder.id, WD_Preview_File_ID: previewFileId,
             Customer_IDs: fmt(ctx.record.Customer_ID), Order_IDs: fmt(ctx.record.Order_IDs),
             Used_In: `${ctx.tableId}#${ctx.rowId} ${ctx.filesCol}`,
             Archived_At: now, Verified_At: now, State: 'direct',
@@ -620,6 +690,17 @@
 
     const uploaderEl = el('div', { class: 'card uploader' });
 
+    // Kept across redraws so a chosen file and its check survive a re-render.
+    const picker = { compression: undefined };
+    picker.input = el('input', {
+      type: 'file', accept: '.tif,.tiff,image/tiff',
+      onchange: async () => {
+        const file = picker.input.files?.[0];
+        picker.compression = file ? await tiffCompression(file).catch(() => null) : undefined;
+        paintUploader();
+      },
+    });
+
     function paintUploader() {
       const parts = [el('h3', {}, 'Upload a design file to WorkDrive (pilot)')];
       if (upload) {
@@ -630,14 +711,21 @@
       } else if (!readToken()) {
         parts.push(el('div', { class: 'meta' }, 'Sign in with WorkDrive to upload.'));
       } else {
-        const input = el('input', { type: 'file', accept: '.tif,.tiff,image/tiff' });
         const missing = [...TEMPLATES.customer.fields, ...TEMPLATES.order.fields]
           .filter(([name]) => !currentMappings?.[name]).map(([, title]) => title);
+        const file = picker.input.files?.[0];
+        const uncompressed = file && picker.compression === 1;
         parts.push(
-          el('div', { class: 'meta' }, `Goes to ${WD_UPLOAD_FOLDER.label}, tagged from this row.`),
+          el('div', { class: 'meta' }, `Goes to ${WD_UPLOAD_FOLDER.label}/<order> - <design>/, tagged from this row.`),
           missing.length && el('div', { class: 'note' }, `Not mapped in the widget settings, so left empty: ${missing.join(', ')}.`),
-          input,
-          el('div', { class: 'actions' }, el('button', { class: 'primary', onclick: () => startUpload(input) }, 'Upload to WorkDrive')));
+          picker.input,
+          uncompressed && el('div', { class: 'note' },
+            `This TIFF is saved without compression (${mb(file.size)}). Saving it again in Photoshop with `
+            + 'Image Compression: ZIP (or LZW) and Layer Compression: ZIP usually makes it 70–95% smaller, '
+            + 'with every pixel and layer kept.'),
+          file && picker.compression > 1 && el('div', { class: 'meta' }, `TIFF compression: ${TIFF_COMPRESSION[picker.compression] || picker.compression} ✓`),
+          el('div', { class: 'actions' }, el('button', { class: 'primary', onclick: () => startUpload(picker.input) },
+            uncompressed ? 'Upload uncompressed anyway' : 'Upload to WorkDrive')));
       }
       uploaderEl.replaceChildren(...parts.filter(Boolean));
     }
@@ -653,6 +741,8 @@
         },
         steps: [], progress: 0, busy: true,
       };
+      picker.input.value = '';
+      picker.compression = undefined;
       runUpload(file, upload.ctx).then(() => render());
     }
 
