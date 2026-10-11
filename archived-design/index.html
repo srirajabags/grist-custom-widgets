@@ -204,6 +204,7 @@
         showAuthError(message.error || 'no token returned');
         return;
       }
+      authError = '';
       saveToken(message.accessToken, message.expiresIn);
       render();
     }
@@ -238,9 +239,11 @@
       });
       if (res.ok) return res;
       // WorkDrive answers an invalid or revoked token with 500 + F7003, not 401.
+      // Keep WorkDrive's reason on screen so a refused sign-in can be diagnosed.
       const body = await res.text();
       if (res.status === 401 || body.includes('F7003')) {
         try { localStorage.removeItem(TOKEN_KEY); } catch (e) {}
+        authError = `WorkDrive refused the sign-in (${res.status}): ${body.slice(0, 300)}`;
         throw new SignedOut();
       }
       throw new Error(`WorkDrive ${res.status}`);
@@ -647,7 +650,6 @@
     grist.onRecord((record, mappings) => {
       currentMappings = mappings;
       current = grist.mapColumnNames(record) || undefined;
-      authError = '';
       render();
     });
 
