@@ -78,10 +78,8 @@
     const ZOHO_CLIENT_ID = '1000.0GM7KCXXOY5Z0QINYDTKQ7SK53JU6I'; // "Grist WorkDrive widgets", api-console.zoho.in
     const ZOHO_AUTH_URL = 'https://accounts.zoho.in/oauth/v2/auth';
     // Upload needs files.CREATE (ZohoFiles.files.CREATE for the stream upload)
-    // and datatemplates.CREATE to tag the file. Files in a Team Folder also need
-    // team and teamfolders READ: without them WorkDrive answers 401 R008
-    // "Unauthorized access" (2026-10-11). Same set as the archiver's token,
-    // minus datatemplates.UPDATE.
+    // and datatemplates.CREATE to tag the file. Same set as the archiver's
+    // token (proven on Team Folder files), minus datatemplates.UPDATE.
     const ZOHO_SCOPE = [
       'WorkDrive.team.READ', 'WorkDrive.teamfolders.READ',
       'WorkDrive.files.READ', 'WorkDrive.files.CREATE',
@@ -243,9 +241,13 @@
         headers: { Authorization: `Zoho-oauthtoken ${token}`, Accept: accept },
       });
       if (res.ok) return res;
-      // WorkDrive answers an invalid or revoked token with 500 + F7003, not 401.
-      // Keep WorkDrive's reason on screen so a refused sign-in can be diagnosed.
+      // WorkDrive answers an invalid or revoked token with 500 + F7003. A 401
+      // with R008 "Unauthorized access" is about the file, not the sign-in: it
+      // is in the Trash, gone, or not shared with this person.
       const body = await res.text();
+      if (body.includes('R008')) {
+        throw new Error('this file is not available in WorkDrive (in the Trash, deleted, or not shared with you)');
+      }
       if (res.status === 401 || body.includes('F7003')) {
         try { localStorage.removeItem(TOKEN_KEY); } catch (e) {}
         authError = `WorkDrive refused the sign-in (${res.status}): ${body.slice(0, 300)}`;
@@ -366,7 +368,7 @@
       loadWorkDrive(row.WD_File_ID, { img, caption, details, actions }, stale).catch((err) => {
         if (stale()) return;
         if (err instanceof SignedOut) { render(); return; }
-        details.append(el('div', { class: 'note' }, `WorkDrive: ${err.message}. You may not have access to the archive folder.`));
+        details.append(el('div', { class: 'note' }, `WorkDrive: ${err.message}.`));
       });
       return card;
     }
