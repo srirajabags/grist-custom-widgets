@@ -1,0 +1,696 @@
+// Shows the design files of the selected row. Files kept in Zoho WorkDrive
+// (see Archived_Files) show the Grist thumbnail at once; after "Sign in with
+// WorkDrive" they also show WorkDrive's large preview, both Data Templates and
+// links to the original.
+//
+// Pilot: "Upload to WorkDrive" sends a design file straight from the browser
+// to WorkDrive (never through Grist, MinIO or Railway), tags it with both
+// Data Templates from the row's mapped columns, and puts a small preview in
+// the row's file cell plus an Archived_Files row with State "direct".
+
+// --- Configuration ---
+const ZOHO_CLIENT_ID = '1000.0GM7KCXXOY5Z0QINYDTKQ7SK53JU6I'; // "Grist WorkDrive widgets", api-console.zoho.in
+const ZOHO_AUTH_URL = 'https://accounts.zoho.in/oauth/v2/auth';
+// Upload needs files.CREATE (ZohoFiles.files.CREATE for the stream upload)
+// and datatemplates.CREATE to tag the file. Same set as the archiver's
+// token (proven on Team Folder files), minus datatemplates.UPDATE.
+const ZOHO_SCOPE = [
+  'WorkDrive.team.READ', 'WorkDrive.teamfolders.READ',
+  'WorkDrive.files.READ', 'WorkDrive.files.CREATE',
+  'ZohoFiles.files.READ', 'ZohoFiles.files.CREATE',
+  'WorkDrive.datatemplates.READ', 'WorkDrive.datatemplates.CREATE',
+].join(',');
+const REDIRECT_URI = new URL('callback.html', location.href).href;
+// WorkDrive read relay in custom-widgets-proxy: browsers can't call
+// WorkDrive directly (no CORS), and its preview server rejects requests
+// from this site. Carries small JSON calls and preview images only;
+// original files open in WorkDrive itself.
+const WD_RELAY = 'https://custom-widgets-proxy-production.up.railway.app/wd';
+// Uploads and template tagging go to WorkDrive directly: these endpoints
+// accept browser calls from this site.
+const WD_API = 'https://www.zohoapis.in/workdrive/api/v1';
+const WD_UPLOAD_URL = 'https://upload.zoho.in/workdrive-api/v1/stream/upload';
+const WD_UPLOAD_FOLDER = { id: '3up9f43069376468b47e4be2130f758b80430', label: 'Customer Design Files Archive/_pilot' };
+const ARCHIVE_TABLE = 'Archived_Files';
+const THUMB_MAX_PX = 800;
+
+// Data Template IDs read from the API on 2026-10-11 (zoho-ids.json). Each
+// field is filled from an optional column mapped in the widget settings.
+const TEMPLATES = {
+  customer: {
+    id: 'p0vcfb8959b7e19d84f078d5f6cfa685273e7-1033793000022399001',
+    fields: [
+      ['Customer_ID', 'Customer ID', 'p0vcfb8959b7e19d84f078d5f6cfa685273e7-MTAzMzc5MzAwMDAyMjM5OTAwMS0xMDMzNzkzMDAwMDIyMzk5MDAy'],
+      ['Customer_Name', 'Customer Name', 'p0vcfb8959b7e19d84f078d5f6cfa685273e7-MTAzMzc5MzAwMDAyMjM5OTAwMS0xMDMzNzkzMDAwMDIyMzk5MDAz'],
+      ['Shop_Name', 'Shop Name', 'p0vcfb8959b7e19d84f078d5f6cfa685273e7-MTAzMzc5MzAwMDAyMjM5OTAwMS0xMDMzNzkzMDAwMDIyMzk5MDA0'],
+      ['Customer_Category', 'Customer Category', 'p0vcfb8959b7e19d84f078d5f6cfa685273e7-MTAzMzc5MzAwMDAyMjM5OTAwMS0xMDMzNzkzMDAwMDIyMzk5MDA1'],
+      ['City', 'City', 'p0vcfb8959b7e19d84f078d5f6cfa685273e7-MTAzMzc5MzAwMDAyMjM5OTAwMS0xMDMzNzkzMDAwMDIyMzk5MDA2'],
+    ],
+  },
+  order: {
+    id: 'p0vcfb8959b7e19d84f078d5f6cfa685273e7-1033793000022399007',
+    fields: [
+      ['Order_IDs', 'Order IDs', 'p0vcfb8959b7e19d84f078d5f6cfa685273e7-MTAzMzc5MzAwMDAyMjM5OTAwNy0xMDMzNzkzMDAwMDIyMzk5MDA4'],
+      ['Sub_Order_IDs', 'Sub-Order IDs', 'p0vcfb8959b7e19d84f078d5f6cfa685273e7-MTAzMzc5MzAwMDAyMjM5OTAwNy0xMDMzNzkzMDAwMDIyMzk5MDA5'],
+      ['Order_Date', 'Order Date', 'p0vcfb8959b7e19d84f078d5f6cfa685273e7-MTAzMzc5MzAwMDAyMjM5OTAwNy0xMDMzNzkzMDAwMDIyMzk5MDEw'],
+      ['Design_Name', 'Design Name', 'p0vcfb8959b7e19d84f078d5f6cfa685273e7-MTAzMzc5MzAwMDAyMjM5OTAwNy0xMDMzNzkzMDAwMDIyMzk5MDEx'],
+    ],
+    // Filled by the widget, not from a column. SHA-1 stays empty for direct
+    // uploads, but must still be sent: see templateBody.
+    sha1: 'p0vcfb8959b7e19d84f078d5f6cfa685273e7-MTAzMzc5MzAwMDAyMjM5OTAwNy0xMDMzNzkzMDAwMDIyMzk5MDEy',
+    source: 'p0vcfb8959b7e19d84f078d5f6cfa685273e7-MTAzMzc5MzAwMDAyMjM5OTAwNy0xMDMzNzkzMDAwMDIyMzk5MDEz',
+    archivedAt: 'p0vcfb8959b7e19d84f078d5f6cfa685273e7-MTAzMzc5MzAwMDAyMjM5OTAwNy0xMDMzNzkzMDAwMDIyMzk5MDE0',
+  },
+};
+const TOKEN_KEY = 'archivedDesign.token';
+const HANDOVER_KEY = 'archivedDesign.handover';
+const STATE_KEY = 'archivedDesign.state';
+
+grist.ready({
+  // Full access: reads Archived_Files, and the upload pilot writes the
+  // preview and the Archived_Files row.
+  requiredAccess: 'full',
+  columns: [
+    { name: 'Files', title: 'Design file column', type: 'Attachments' },
+    ...[...TEMPLATES.customer.fields, ...TEMPLATES.order.fields].map(([name, title]) => ({
+      name, title: `${title} (for upload)`, optional: true,
+    })),
+  ],
+});
+
+// --- Small DOM helper: text only, never innerHTML ---
+function el(tag, attrs = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (v === undefined || v === null || v === false) continue;
+    if (k.startsWith('on')) node.addEventListener(k.slice(2), v);
+    else node.setAttribute(k, v);
+  }
+  for (const c of children.flat()) {
+    if (c === undefined || c === null || c === false) continue;
+    node.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  }
+  return node;
+}
+
+const mb = (bytes) => `${(Number(bytes) / 1048576).toFixed(1)} MB`;
+const day = (seconds) => seconds
+  ? new Date(seconds * 1000).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' })
+  : '';
+
+// --- WorkDrive sign-in (implicit grant, token kept for its lifetime) ---
+function readToken() {
+  try {
+    const t = JSON.parse(localStorage.getItem(TOKEN_KEY) || 'null');
+    if (t && t.accessToken && t.scope === ZOHO_SCOPE && Date.now() < t.expiresAt) return t.accessToken;
+    localStorage.removeItem(TOKEN_KEY);
+  } catch (e) {}
+  return null;
+}
+
+function saveToken(accessToken, expiresInSeconds) {
+  try {
+    // Expire a minute early so a call never goes out with a dying token.
+    localStorage.setItem(TOKEN_KEY, JSON.stringify({
+      accessToken, scope: ZOHO_SCOPE, expiresAt: Date.now() + (expiresInSeconds - 60) * 1000,
+    }));
+  } catch (e) {}
+}
+
+function signOut() {
+  try { localStorage.removeItem(TOKEN_KEY); } catch (e) {}
+  render();
+}
+
+function signIn() {
+  const state = crypto.randomUUID();
+  sessionStorage.setItem(STATE_KEY, state);
+  const url = new URL(ZOHO_AUTH_URL);
+  url.search = new URLSearchParams({
+    response_type: 'token', client_id: ZOHO_CLIENT_ID, scope: ZOHO_SCOPE,
+    redirect_uri: REDIRECT_URI, state,
+  });
+  window.open(url.href, 'wd-signin', 'width=520,height=680');
+}
+
+function acceptAuth(message) {
+  const expected = sessionStorage.getItem(STATE_KEY);
+  if (!message || message.type !== 'archived-design-auth' || !expected || message.state !== expected) return;
+  sessionStorage.removeItem(STATE_KEY);
+  if (message.error || !message.accessToken) {
+    showAuthError(message.error || 'no token returned');
+    return;
+  }
+  authError = '';
+  saveToken(message.accessToken, message.expiresIn);
+  render();
+}
+
+window.addEventListener('message', (event) => {
+  if (event.origin !== location.origin) return;
+  acceptAuth(event.data);
+});
+
+function takeHandover() {
+  try {
+    const raw = localStorage.getItem(HANDOVER_KEY);
+    if (!raw) return;
+    localStorage.removeItem(HANDOVER_KEY);
+    const message = JSON.parse(raw);
+    if (Date.now() - message.at < 5 * 60 * 1000) acceptAuth(message);
+  } catch (e) {}
+}
+window.addEventListener('storage', (event) => { if (event.key === HANDOVER_KEY) takeHandover(); });
+
+let authError = '';
+function showAuthError(err) { authError = `WorkDrive sign-in failed: ${err}`; render(); }
+
+// --- API calls ---
+class SignedOut extends Error {}
+
+async function wdRelay(path, accept) {
+  const token = readToken();
+  if (!token) throw new SignedOut();
+  const res = await fetch(WD_RELAY + path, {
+    headers: { Authorization: `Zoho-oauthtoken ${token}`, Accept: accept },
+  });
+  if (res.ok) return res;
+  // WorkDrive answers an invalid or revoked token with 500 + F7003. A 401
+  // with R008 "Unauthorized access" is about the file, not the sign-in: it
+  // is in the Trash, gone, or not shared with this person.
+  const body = await res.text();
+  if (body.includes('R008')) {
+    throw new Error('this file is not available in WorkDrive (in the Trash, deleted, or not shared with you)');
+  }
+  if (res.status === 401 || body.includes('F7003')) {
+    try { localStorage.removeItem(TOKEN_KEY); } catch (e) {}
+    authError = `WorkDrive refused the sign-in (${res.status}): ${body.slice(0, 300)}`;
+    throw new SignedOut();
+  }
+  throw new Error(`WorkDrive ${res.status}`);
+}
+
+const wd = async (path) => (await wdRelay(path, 'application/vnd.api+json')).json();
+
+async function wdImage(url) {
+  const res = await wdRelay(`/preview?url=${encodeURIComponent(url)}`, 'image/*');
+  return URL.createObjectURL(await res.blob());
+}
+
+async function gristAccess() {
+  const { token, baseUrl } = await grist.docApi.getAccessToken({ readOnly: true });
+  return { baseUrl, q: `auth=${encodeURIComponent(token)}` };
+}
+
+async function archivedRows(access, ids) {
+  const filter = encodeURIComponent(JSON.stringify({ Thumbnail_Attachment_Id: ids }));
+  const res = await fetch(`${access.baseUrl}/tables/${ARCHIVE_TABLE}/records?filter=${filter}&${access.q}`);
+  if (res.status === 404) return [];
+  if (!res.ok) throw new Error(`Grist ${res.status}`);
+  return (await res.json()).records;
+}
+
+async function attachmentMeta(access, id) {
+  const res = await fetch(`${access.baseUrl}/attachments/${id}?${access.q}`);
+  return res.ok ? res.json() : { fileName: `Attachment ${id}` };
+}
+
+// --- Rendering ---
+let current = null;   // the selected record, already mapped
+let renderSeq = 0;    // drops results of an earlier selection
+
+function renderHeader() {
+  const signedIn = Boolean(readToken());
+  document.getElementById('who').textContent = signedIn ? 'WorkDrive: signed in' : 'WorkDrive: not signed in';
+  const slot = document.getElementById('auth-action');
+  slot.replaceChildren(signedIn
+    ? el('button', { class: 'link-btn', onclick: signOut }, 'Sign out')
+    : el('button', { class: 'primary', onclick: signIn }, 'Sign in with WorkDrive'));
+}
+
+async function render() {
+  const seq = ++renderSeq;
+  renderHeader();
+  const app = document.getElementById('app');
+  const stale = () => seq !== renderSeq;
+
+  if (current === undefined) {
+    app.replaceChildren(el('div', { class: 'empty' }, 'Choose the design file column in this widget\'s settings (“Design file column”).'));
+    return;
+  }
+  if (!current) { app.replaceChildren(el('div', { class: 'empty' }, 'Select a row.')); return; }
+  const ids = (Array.isArray(current.Files) ? current.Files : []).filter((x) => typeof x === 'number');
+
+  const cards = [];
+  if (authError) cards.push(el('div', { class: 'note' }, authError));
+  if (!ids.length) cards.push(el('div', { class: 'empty' }, 'No design file on this row.'));
+  else {
+    let access, rows;
+    try {
+      access = await gristAccess();
+      rows = await archivedRows(access, ids);
+    } catch (err) {
+      if (!stale()) app.replaceChildren(el('div', { class: 'note' }, `Could not read ${ARCHIVE_TABLE}: ${err.message}`));
+      return;
+    }
+    if (stale()) return;
+    const byThumb = new Map(rows.map((r) => [r.fields.Thumbnail_Attachment_Id, r.fields]));
+    for (const id of ids) {
+      cards.push(byThumb.has(id) ? archivedCard(access, id, byThumb.get(id), stale) : activeCard(access, id));
+    }
+  }
+  cards.push(uploaderCard());
+  app.replaceChildren(...cards);
+}
+
+function activeCard(access, id) {
+  const title = el('div', { class: 'title' }, '…');
+  const meta = el('div', { class: 'meta' });
+  attachmentMeta(access, id).then((m) => {
+    title.textContent = m.fileName;
+    meta.textContent = m.fileSize ? mb(m.fileSize) : '';
+  });
+  return el('div', { class: 'card' },
+    el('span', { class: 'badge active' }, 'In Grist'), title, meta);
+}
+
+function archivedCard(access, thumbId, row, stale) {
+  const img = el('img', {
+    class: 'preview', alt: `Preview of ${row.Original_Name}`,
+    src: `${access.baseUrl}/attachments/${thumbId}/download?${access.q}`,
+  });
+  const caption = el('div', { class: 'caption' }, 'Thumbnail stored in Grist (800 px)');
+  const details = el('div');
+  const actions = el('div', { class: 'actions' },
+    row.WD_Permalink && el('a', { class: 'btn primary', href: row.WD_Permalink, target: '_blank', rel: 'noopener' }, 'Open in WorkDrive'),
+    row.WD_Folder_ID && el('a', { class: 'btn', href: `https://workdrive.zoho.in/folder/${row.WD_Folder_ID}`, target: '_blank', rel: 'noopener' }, 'Open folder'));
+
+  const card = el('div', { class: 'card' },
+    el('span', { class: 'badge archived' }, row.State === 'direct' ? 'Uploaded to WorkDrive' : 'Archived to WorkDrive'),
+    el('div', { class: 'title' }, row.Original_Name),
+    el('div', { class: 'meta' }, [mb(row.Size_Bytes), row.Archived_At && `${row.State === 'direct' ? 'uploaded' : 'archived'} ${day(row.Archived_At)}`].filter(Boolean).join(' · ')),
+    img, caption, details, actions);
+
+  if (!readToken()) {
+    details.append(
+      el('div', { class: 'group' }, el('h4', {}, 'From Grist'),
+        el('span', { class: 'pill' }, el('b', {}, 'Customer: '), row.Customer_IDs || '—'),
+        el('span', { class: 'pill' }, el('b', {}, 'Order: '), row.Order_IDs || '—')),
+      el('div', { class: 'note' }, 'Sign in with WorkDrive to see the large preview and all template details.'));
+    return card;
+  }
+
+  loadWorkDrive(row.WD_File_ID, { img, caption, details, actions }, stale).catch((err) => {
+    if (stale()) return;
+    if (err instanceof SignedOut) { render(); return; }
+    details.append(el('div', { class: 'note' }, `WorkDrive: ${err.message}.`));
+  });
+  return card;
+}
+
+async function loadWorkDrive(fileId, ui, stale) {
+  const [file, templates, preview] = await Promise.all([
+    wd(`/files/${fileId}`),
+    wd(`/files/${fileId}/custommetadata`),
+    wd(`/files/${fileId}/previewinfo`).catch(() => null),
+  ]);
+  if (stale()) return;
+
+  for (const t of templates.data || []) {
+    const a = t.attributes;
+    ui.details.append(el('div', { class: 'group' }, el('h4', {}, a.name),
+      (a.custom_data || []).filter((f) => f.value).map((f) =>
+        el('span', { class: 'pill' }, el('b', {}, `${f.display_name}: `), f.value))));
+  }
+
+  const download = file.data?.attributes?.download_url;
+  if (download) ui.actions.append(el('a', { class: 'btn', href: download, target: '_blank', rel: 'noopener' }, 'Download original'));
+
+  // WorkDrive only renders previews for files up to 250 MB; larger ones
+  // keep the Grist thumbnail. A failed preview is not an error: the
+  // thumbnail stays and WorkDrive's own viewer is one click away.
+  const p = preview?.data?.attributes;
+  const openFull = p?.preview_url
+    && el('a', { href: p.preview_url, target: '_blank', rel: 'noopener' }, 'open preview in WorkDrive');
+  if (!(p?.preview_data_url && p.preview_status === 1)) {
+    ui.caption.replaceChildren('Thumbnail stored in Grist (800 px). WorkDrive has no preview for this file.');
+    return;
+  }
+  const src = await wdImage(p.preview_data_url).catch(() => '');
+  if (stale()) { if (src) URL.revokeObjectURL(src); return; }
+  if (src) {
+    ui.img.src = src;
+    ui.caption.replaceChildren('WorkDrive preview · ', openFull);
+  } else {
+    ui.caption.replaceChildren('Thumbnail stored in Grist (800 px) · ', openFull);
+  }
+}
+
+// --- Upload pilot: browser → WorkDrive, tagged from the row ---
+const fmt = (v) => {
+  if (v === null || v === undefined) return '';
+  if (v instanceof Date) return v.toISOString().slice(0, 10);
+  if (Array.isArray(v)) return v.filter((x) => x !== 'L').map(fmt).filter(Boolean).join(', ');
+  return String(v).trim();
+};
+const istStamp = (d) => `${d.toLocaleString('sv-SE', { timeZone: 'Asia/Kolkata', hour12: false })} IST`;
+
+let upload = null; // { ctx, steps, progress, busy } while one runs; one at a time
+
+function streamUpload(file, name, token, onProgress, parentId) {
+  // XMLHttpRequest, because fetch can't report upload progress. The file is
+  // streamed from disk by the browser, whatever its size.
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', WD_UPLOAD_URL);
+    xhr.setRequestHeader('Authorization', `Zoho-oauthtoken ${token}`);
+    xhr.setRequestHeader('x-filename', encodeURIComponent(name));
+    xhr.setRequestHeader('x-parent_id', parentId);
+    xhr.setRequestHeader('upload-id', crypto.randomUUID());
+    xhr.setRequestHeader('x-streammode', '1');
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
+    xhr.onload = () => (xhr.status >= 200 && xhr.status < 300)
+      ? resolve(xhr.responseText)
+      : reject(new Error(`upload failed (${xhr.status}) ${xhr.responseText.slice(0, 200)}`));
+    xhr.onerror = () => reject(new Error('upload failed (network)'));
+    xhr.send(file);
+  });
+}
+
+function uploadedFileId(text) {
+  const json = JSON.parse(text);
+  const item = Array.isArray(json.data) ? json.data[0] : json.data;
+  const a = item?.attributes || {};
+  if (a.resource_id) return a.resource_id;
+  try { return JSON.parse(a.file_info).RESOURCE_ID; } catch (e) {}
+  if (item?.id) return item.id;
+  throw new Error('no file ID in the upload reply');
+}
+
+async function wdPost(path, body) {
+  const token = readToken();
+  if (!token) throw new SignedOut();
+  const res = await fetch(WD_API + path, {
+    method: 'POST',
+    headers: {
+      Authorization: `Zoho-oauthtoken ${token}`,
+      'Content-Type': 'application/vnd.api+json', Accept: 'application/vnd.api+json',
+    },
+    body: JSON.stringify(body),
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`WorkDrive ${res.status} ${text.slice(0, 200)}`);
+  const json = text ? JSON.parse(text) : null;
+  // A batch call answers 207 with the items it rejected in meta.failed_events.
+  const failed = json?.meta?.failed_events || [];
+  if (failed.length) {
+    throw new Error(`WorkDrive rejected: ${failed.map((f) => `${f.error_code} ${f.error_description}`).join('; ')}`);
+  }
+  return json;
+}
+
+// WorkDrive rejects an association that leaves out any of the template's
+// fields (CF064 "CustomField id/count validation failed"), so every field is
+// sent, empty ones as "".
+function templateBody(fileId, ctx) {
+  const values = (t) => t.fields
+    .map(([name, , fieldId]) => ({ custom_field_id: fieldId, value: fmt(ctx.record[name]) }));
+  const order = values(TEMPLATES.order);
+  order.push({ custom_field_id: TEMPLATES.order.sha1, value: '' });
+  order.push({ custom_field_id: TEMPLATES.order.source, value: `Direct upload: ${ctx.tableId}#${ctx.rowId} ${ctx.filesCol}` });
+  order.push({ custom_field_id: TEMPLATES.order.archivedAt, value: istStamp(new Date()) });
+  return {
+    data: [
+      { type: 'custommetadata', attributes: { resource_id: fileId, data_template_id: TEMPLATES.customer.id, custom_data: values(TEMPLATES.customer) } },
+      { type: 'custommetadata', attributes: { resource_id: fileId, data_template_id: TEMPLATES.order.id, custom_data: order } },
+    ],
+  };
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function toJpeg(canvas) {
+  return new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.8));
+}
+
+async function scaledJpeg(blob) {
+  const bmp = await createImageBitmap(blob);
+  const k = Math.min(1, THUMB_MAX_PX / Math.max(bmp.width, bmp.height));
+  const c = el('canvas', { width: Math.round(bmp.width * k), height: Math.round(bmp.height * k) });
+  const g = c.getContext('2d');
+  g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height);
+  g.drawImage(bmp, 0, 0, c.width, c.height);
+  return toJpeg(c);
+}
+
+// For files WorkDrive won't preview (over 250 MB): a plain card, so the row
+// still shows that a design file exists and where it is.
+async function placeholderJpeg(fileName) {
+  const c = el('canvas', { width: 800, height: 450 });
+  const g = c.getContext('2d');
+  g.fillStyle = '#f2f3f7'; g.fillRect(0, 0, 800, 450);
+  g.fillStyle = '#262633'; g.font = 'bold 30px sans-serif'; g.fillText('Design file in Zoho WorkDrive', 40, 180);
+  g.font = '22px sans-serif'; g.fillText(fileName.slice(0, 60), 40, 230);
+  g.fillStyle = '#686881'; g.fillText('No preview: open it from the Archived design widget', 40, 280);
+  return toJpeg(c);
+}
+
+// WorkDrive renders its preview a little after the upload; wait up to ~90 s.
+async function gristPreview(fileId, file, note) {
+  for (let i = 0; i < 18; i++) {
+    const p = (await wd(`/files/${fileId}/previewinfo`).catch(() => null))?.data?.attributes;
+    if (p && file.size > Number(p.conversion_size_limit_in_bytes || Infinity)) break;
+    if (p?.preview_status === 1 && p.preview_data_url) {
+      const res = await wdRelay(`/preview?url=${encodeURIComponent(p.preview_data_url)}`, 'image/*');
+      return { blob: await scaledJpeg(await res.blob()), kind: 'WorkDrive preview' };
+    }
+    note(`waiting for WorkDrive's preview (${(i + 1) * 5} s)`);
+    await sleep(5000);
+  }
+  return { blob: await placeholderJpeg(file.name), kind: 'placeholder (no WorkDrive preview)' };
+}
+
+// Uploads with the viewer's own Grist session, as Grist's UI does. An access
+// token (?auth=) makes the request run as the anonymous user, and Grist
+// 1.7.21 fails attachment uploads that way (500). This page and Grist are the
+// same site and Grist trusts this origin with credentials, so the session
+// cookie goes along. X-Requested-With satisfies Grist's CSRF check.
+async function gristAttach(blob, name) {
+  const { baseUrl } = await grist.docApi.getAccessToken({ readOnly: true });
+  const form = new FormData();
+  form.append('upload', blob, name);
+  const res = await fetch(`${baseUrl}/attachments`, {
+    method: 'POST', body: form, credentials: 'include',
+    headers: { 'X-Requested-With': 'XMLHttpRequest' },
+  });
+  if (!res.ok) throw new Error(`Grist attachment upload ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  return (await res.json())[0];
+}
+
+// The row's files as they are now, if it is still the selected row (an
+// upload can take minutes); otherwise as they were when it started.
+function latestIds(ctx) {
+  const files = current?.id === ctx.rowId ? current.Files : ctx.existingIds;
+  return (Array.isArray(files) ? files : []).filter((x) => typeof x === 'number');
+}
+
+// Compression of the first image in a classic TIFF (tag 259): 1 = none,
+// 5 = LZW, 8 / 32946 = ZIP. Reads only the header and first directory, so it
+// is instant whatever the file size. null = not a TIFF, or BigTIFF.
+const TIFF_COMPRESSION = { 1: 'none', 5: 'LZW', 7: 'JPEG', 8: 'ZIP', 32946: 'ZIP', 32773: 'PackBits' };
+
+async function tiffCompression(file) {
+  const head = new DataView(await file.slice(0, 8).arrayBuffer());
+  const order = head.getUint16(0);
+  const le = order === 0x4949;
+  if (!le && order !== 0x4d4d) return null;
+  if (head.getUint16(2, le) !== 42) return null;
+  const ifd = head.getUint32(4, le);
+  const count = new DataView(await file.slice(ifd, ifd + 2).arrayBuffer()).getUint16(0, le);
+  const entries = new DataView(await file.slice(ifd + 2, ifd + 2 + count * 12).arrayBuffer());
+  for (let i = 0; i < count; i++) {
+    if (entries.getUint16(i * 12, le) !== 259) continue;
+    const type = entries.getUint16(i * 12 + 2, le);
+    return type === 3 ? entries.getUint16(i * 12 + 8, le) : entries.getUint32(i * 12 + 8, le);
+  }
+  return 1; // no Compression tag means uncompressed
+}
+
+// One WorkDrive folder per design, "{Order IDs} - {Design Name}", holding the
+// TIFF and its preview JPG (and any A/B variants uploaded for the same design).
+const safeName = (s) => s.replace(/[\\/:*?"<>|]+/g, '-').replace(/\s+/g, ' ').trim().slice(0, 120);
+
+function designFolderName(ctx, file) {
+  const design = fmt(ctx.record.Design_Name) || file.name.replace(/\.[^.]+$/, '');
+  return safeName([fmt(ctx.record.Order_IDs), design].filter(Boolean).join(' - '));
+}
+
+// Folder listing and creation accept browser calls from this site.
+async function wdGet(path) {
+  const token = readToken();
+  if (!token) throw new SignedOut();
+  const res = await fetch(WD_API + path, { headers: { Authorization: `Zoho-oauthtoken ${token}`, Accept: 'application/vnd.api+json' } });
+  if (!res.ok) throw new Error(`WorkDrive ${res.status} ${(await res.text()).slice(0, 200)}`);
+  return res.json();
+}
+
+async function designFolder(name) {
+  const list = await wdGet(`/files/${WD_UPLOAD_FOLDER.id}/files?filter%5Btype%5D=folder&page%5Blimit%5D=200`);
+  const same = (list.data || []).find((f) =>
+    f.attributes.type === 'folder' && f.attributes.name.toLowerCase() === name.toLowerCase());
+  if (same) return { id: same.id, created: false };
+  const made = await wdPost('/files', { data: { type: 'files', attributes: { name, parent_id: WD_UPLOAD_FOLDER.id } } });
+  const item = Array.isArray(made.data) ? made.data[0] : made.data;
+  return { id: item.id, created: true };
+}
+
+async function runUpload(file, ctx) {
+  const step = (text, cls = '') => { upload.steps.push({ text, cls }); paintUploader(); return upload.steps.length - 1; };
+  const update = (i, text, cls) => { upload.steps[i] = { text, cls }; paintUploader(); };
+  upload.busy = true;
+  window.onbeforeunload = () => 'An upload to WorkDrive is still running.';
+  let fileId = null;
+  try {
+    const folderName = designFolderName(ctx, file);
+    let i = step(`Finding the design folder "${folderName}"…`);
+    const folder = await designFolder(folderName);
+    update(i, `✓ ${folder.created ? 'Created' : 'Using'} folder ${WD_UPLOAD_FOLDER.label}/${folderName}`, 'done');
+
+    i = step(`Uploading ${file.name} (${mb(file.size)})…`);
+    const started = Date.now();
+    const reply = await streamUpload(file, file.name, readToken(), (f) => { upload.progress = f; paintUploader(); }, folder.id);
+    fileId = uploadedFileId(reply);
+    update(i, `✓ Uploaded in ${Math.round((Date.now() - started) / 1000)} s`, 'done');
+
+    i = step('Attaching Customer Details and Order Details…');
+    await wdPost('/custommetadata', templateBody(fileId, ctx));
+    update(i, '✓ Data Templates attached', 'done');
+
+    i = step('Checking the copy in WorkDrive…');
+    const [info, tags] = await Promise.all([wd(`/files/${fileId}`), wd(`/files/${fileId}/custommetadata`)]);
+    const a = info.data.attributes;
+    const size = Number(a.storage_info?.size_in_bytes);
+    const names = (tags.data || []).map((t) => t.attributes.name);
+    if (size !== file.size) throw new Error(`WorkDrive has ${size} bytes, the file has ${file.size}`);
+    const missing = ['Customer Details', 'Order Details'].filter((n) => !names.includes(n));
+    if (missing.length) throw new Error(`template missing in WorkDrive: ${missing.join(', ')}`);
+    update(i, `✓ Same size (${file.size} bytes), both templates present`, 'done');
+
+    i = step('Making the Grist preview…');
+    const preview = await gristPreview(fileId, file, (t) => update(i, `Making the Grist preview: ${t}…`));
+    const previewName = `${file.name.replace(/\.[^.]+$/, '')}.preview.jpg`;
+    const thumbId = await gristAttach(preview.blob, previewName);
+    update(i, `✓ Preview added to Grist (${preview.kind})`, 'done');
+
+    // A copy next to the TIFF in WorkDrive. Not for the placeholder, and not
+    // fatal: the TIFF and its templates are already safe.
+    let previewFileId = '';
+    if (preview.kind === 'WorkDrive preview') {
+      i = step('Saving the preview JPG in the design folder…');
+      try {
+        previewFileId = uploadedFileId(await streamUpload(preview.blob, previewName, readToken(), () => {}, folder.id));
+        update(i, `✓ ${previewName} saved next to the TIFF`, 'done');
+      } catch (err) {
+        update(i, `✗ Preview not saved in WorkDrive (${err.message}); continuing`, 'fail');
+      }
+    }
+
+    i = step('Linking it to the row…');
+    const now = Date.now() / 1000;
+    await grist.docApi.applyUserActions([
+      ['AddRecord', ARCHIVE_TABLE, null, {
+        Original_Name: file.name, Size_Bytes: file.size, Thumbnail_Attachment_Id: thumbId,
+        WD_File_ID: fileId, WD_Permalink: a.permalink, WD_Folder: `${WD_UPLOAD_FOLDER.label}/${folderName}`,
+        WD_Folder_ID: folder.id, WD_Preview_File_ID: previewFileId,
+        Customer_IDs: fmt(ctx.record.Customer_ID), Order_IDs: fmt(ctx.record.Order_IDs),
+        Used_In: `${ctx.tableId}#${ctx.rowId} ${ctx.filesCol}`,
+        Archived_At: now, Verified_At: now, State: 'direct',
+      }],
+      ['UpdateRecord', ctx.tableId, ctx.rowId, { [ctx.filesCol]: ['L', ...latestIds(ctx), thumbId] }],
+    ]);
+    update(i, '✓ Added to the row and to Archived_Files', 'done');
+    upload.done = true;
+  } catch (err) {
+    if (err instanceof SignedOut) step('✗ WorkDrive sign-in expired. Sign in again and retry.', 'fail');
+    else step(`✗ ${err.message}`, 'fail');
+    if (fileId) step(`The file is in WorkDrive (${fileId}) but this upload did not finish; tell the admin.`, 'fail');
+  } finally {
+    upload.busy = false;
+    window.onbeforeunload = null;
+    paintUploader();
+  }
+}
+
+const uploaderEl = el('div', { class: 'card uploader' });
+
+// Kept across redraws so a chosen file and its check survive a re-render.
+const picker = { compression: undefined };
+picker.input = el('input', {
+  type: 'file', accept: '.tif,.tiff,image/tiff',
+  onchange: async () => {
+    const file = picker.input.files?.[0];
+    picker.compression = file ? await tiffCompression(file).catch(() => null) : undefined;
+    paintUploader();
+  },
+});
+
+function paintUploader() {
+  const parts = [el('h3', {}, 'Upload a design file to WorkDrive (pilot)')];
+  if (upload) {
+    parts.push(el('div', { class: 'meta' }, `For ${upload.ctx.tableId} row ${upload.ctx.rowId}`));
+    if (upload.busy && upload.progress < 1) parts.push(el('progress', { max: 1, value: upload.progress }));
+    parts.push(el('ul', { class: 'steps' }, upload.steps.map((s) => el('li', { class: s.cls }, s.text))));
+    if (!upload.busy) parts.push(el('div', { class: 'actions' }, el('button', { onclick: () => { upload = null; render(); } }, 'Done')));
+  } else if (!readToken()) {
+    parts.push(el('div', { class: 'meta' }, 'Sign in with WorkDrive to upload.'));
+  } else {
+    const missing = [...TEMPLATES.customer.fields, ...TEMPLATES.order.fields]
+      .filter(([name]) => !currentMappings?.[name]).map(([, title]) => title);
+    const file = picker.input.files?.[0];
+    const uncompressed = file && picker.compression === 1;
+    parts.push(
+      el('div', { class: 'meta' }, `Goes to ${WD_UPLOAD_FOLDER.label}/<order> - <design>/, tagged from this row.`),
+      missing.length && el('div', { class: 'note' }, `Not mapped in the widget settings, so left empty: ${missing.join(', ')}.`),
+      picker.input,
+      uncompressed && el('div', { class: 'note' },
+        `This TIFF is saved without compression (${mb(file.size)}). Saving it again in Photoshop with `
+        + 'Image Compression: ZIP (or LZW) and Layer Compression: ZIP usually makes it 70–95% smaller, '
+        + 'with every pixel and layer kept.'),
+      file && picker.compression > 1 && el('div', { class: 'meta' }, `TIFF compression: ${TIFF_COMPRESSION[picker.compression] || picker.compression} ✓`),
+      el('div', { class: 'actions' }, el('button', { class: 'primary', onclick: () => startUpload(picker.input) },
+        uncompressed ? 'Upload uncompressed anyway' : 'Upload to WorkDrive')));
+  }
+  uploaderEl.replaceChildren(...parts.filter(Boolean));
+}
+
+async function startUpload(input) {
+  const file = input.files?.[0];
+  if (!file || !current || upload?.busy) return;
+  const tableId = await grist.getSelectedTableId();
+  upload = {
+    ctx: {
+      tableId, rowId: current.id, filesCol: currentMappings.Files, record: { ...current },
+      existingIds: (Array.isArray(current.Files) ? current.Files : []).filter((x) => typeof x === 'number'),
+    },
+    steps: [], progress: 0, busy: true,
+  };
+  picker.input.value = '';
+  picker.compression = undefined;
+  runUpload(file, upload.ctx).then(() => render());
+}
+
+function uploaderCard() {
+  paintUploader();
+  return uploaderEl;
+}
+
+let currentMappings = null;
+grist.onRecord((record, mappings) => {
+  currentMappings = mappings;
+  current = grist.mapColumnNames(record) || undefined;
+  render();
+});
+
+takeHandover();
+renderHeader();
