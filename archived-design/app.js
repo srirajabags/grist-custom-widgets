@@ -545,6 +545,10 @@ async function designFolder(name) {
   return { id: item.id, created: true };
 }
 
+// Lossless ZIP recompression of uncompressed TIFFs (tiff-zip.mjs), loaded fresh
+// like this file.
+const loadTiffZip = () => import(new URL(`tiff-zip.mjs?t=${Date.now()}`, location.href).href);
+
 async function runUpload(file, ctx) {
   const step = (text, cls = '') => { upload.steps.push({ text, cls }); paintUploader(); return upload.steps.length - 1; };
   const update = (i, text, cls) => { upload.steps[i] = { text, cls }; paintUploader(); };
@@ -557,9 +561,29 @@ async function runUpload(file, ctx) {
     const folder = await designFolder(folderName);
     update(i, `✓ ${folder.created ? 'Created' : 'Using'} folder ${WD_UPLOAD_FOLDER.label}/${folderName}`, 'done');
 
-    i = step(`Uploading ${file.name} (${mb(file.size)})…`);
+    // Compress first. Anything that can't be handled safely, or a copy that
+    // fails its own check, falls back to uploading the file as chosen.
+    let body = file;
+    i = step('Compressing losslessly (ZIP)…');
+    try {
+      const { zipTiff, NotSupported } = await loadTiffZip();
+      try {
+        const z = await zipTiff(file, (f) => { upload.progress = f; paintUploader(); });
+        body = z.blob;
+        update(i, `✓ Compressed ${mb(z.originalSize)} → ${mb(z.size)} (${Math.round(100 * (1 - z.size / z.originalSize))}% smaller); every pixel and tag checked, layers kept`, 'done');
+      } catch (err) {
+        if (!(err instanceof NotSupported)) throw err;
+        update(i, `– Not compressed (${err.message}); uploading as is`, '');
+      }
+    } catch (err) {
+      body = file;
+      update(i, `✗ Compression stopped (${err.message}); uploading the original`, 'fail');
+    }
+    upload.progress = 0;
+
+    i = step(`Uploading ${file.name} (${mb(body.size)})…`);
     const started = Date.now();
-    const reply = await streamUpload(file, file.name, readToken(), (f) => { upload.progress = f; paintUploader(); }, folder.id);
+    const reply = await streamUpload(body, file.name, readToken(), (f) => { upload.progress = f; paintUploader(); }, folder.id);
     fileId = uploadedFileId(reply);
     update(i, `✓ Uploaded in ${Math.round((Date.now() - started) / 1000)} s`, 'done');
 
@@ -572,10 +596,10 @@ async function runUpload(file, ctx) {
     const a = info.data.attributes;
     const size = Number(a.storage_info?.size_in_bytes);
     const names = (tags.data || []).map((t) => t.attributes.name);
-    if (size !== file.size) throw new Error(`WorkDrive has ${size} bytes, the file has ${file.size}`);
+    if (size !== body.size) throw new Error(`WorkDrive has ${size} bytes, the upload had ${body.size}`);
     const missing = ['Customer Details', 'Order Details'].filter((n) => !names.includes(n));
     if (missing.length) throw new Error(`template missing in WorkDrive: ${missing.join(', ')}`);
-    update(i, `✓ Same size (${file.size} bytes), both templates present`, 'done');
+    update(i, `✓ Same size (${body.size} bytes), both templates present`, 'done');
 
     i = step('Making the Grist preview…');
     const preview = await gristPreview(fileId, file, (t) => update(i, `Making the Grist preview: ${t}…`));
@@ -600,7 +624,7 @@ async function runUpload(file, ctx) {
     const now = Date.now() / 1000;
     await grist.docApi.applyUserActions([
       ['AddRecord', ARCHIVE_TABLE, null, {
-        Original_Name: file.name, Size_Bytes: file.size, Thumbnail_Attachment_Id: thumbId,
+        Original_Name: file.name, Size_Bytes: body.size, Source_Size_Bytes: file.size, Thumbnail_Attachment_Id: thumbId,
         WD_File_ID: fileId, WD_Permalink: a.permalink, WD_Folder: `${WD_UPLOAD_FOLDER.label}/${folderName}`,
         WD_Folder_ID: folder.id, WD_Preview_File_ID: previewFileId,
         Customer_IDs: fmt(ctx.record.Customer_ID), Order_IDs: fmt(ctx.record.Order_IDs),
@@ -653,13 +677,10 @@ function paintUploader() {
       el('div', { class: 'meta' }, `Goes to ${WD_UPLOAD_FOLDER.label}/<order> - <design>/, tagged from this row.`),
       missing.length && el('div', { class: 'note' }, `Not mapped in the widget settings, so left empty: ${missing.join(', ')}.`),
       picker.input,
-      uncompressed && el('div', { class: 'note' },
-        `This TIFF is saved without compression (${mb(file.size)}). Saving it again in Photoshop with `
-        + 'Image Compression: ZIP (or LZW) and Layer Compression: ZIP usually makes it 70–95% smaller, '
-        + 'with every pixel and layer kept.'),
-      file && picker.compression > 1 && el('div', { class: 'meta' }, `TIFF compression: ${TIFF_COMPRESSION[picker.compression] || picker.compression} ✓`),
-      el('div', { class: 'actions' }, el('button', { class: 'primary', onclick: () => startUpload(picker.input) },
-        uncompressed ? 'Upload uncompressed anyway' : 'Upload to WorkDrive')));
+      uncompressed && el('div', { class: 'meta' },
+        `Uncompressed TIFF (${mb(file.size)}): it will be compressed losslessly (ZIP) before upload. Layers are kept.`),
+      file && picker.compression > 1 && el('div', { class: 'meta' }, `Already compressed (${TIFF_COMPRESSION[picker.compression] || picker.compression}): uploaded as is.`),
+      el('div', { class: 'actions' }, el('button', { class: 'primary', onclick: () => startUpload(picker.input) }, 'Upload to WorkDrive')));
   }
   uploaderEl.replaceChildren(...parts.filter(Boolean));
 }
