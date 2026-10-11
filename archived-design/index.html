@@ -78,9 +78,14 @@
     const ZOHO_CLIENT_ID = '1000.0GM7KCXXOY5Z0QINYDTKQ7SK53JU6I'; // "Grist WorkDrive widgets", api-console.zoho.in
     const ZOHO_AUTH_URL = 'https://accounts.zoho.in/oauth/v2/auth';
     // Upload needs files.CREATE (ZohoFiles.files.CREATE for the stream upload)
-    // and datatemplates.CREATE to tag the file.
+    // and datatemplates.CREATE to tag the file. Files in a Team Folder also need
+    // team and teamfolders READ: without them WorkDrive answers 401 R008
+    // "Unauthorized access" (2026-10-11). Same set as the archiver's token,
+    // minus datatemplates.UPDATE.
     const ZOHO_SCOPE = [
-      'WorkDrive.files.READ', 'WorkDrive.files.CREATE', 'ZohoFiles.files.CREATE',
+      'WorkDrive.team.READ', 'WorkDrive.teamfolders.READ',
+      'WorkDrive.files.READ', 'WorkDrive.files.CREATE',
+      'ZohoFiles.files.READ', 'ZohoFiles.files.CREATE',
       'WorkDrive.datatemplates.READ', 'WorkDrive.datatemplates.CREATE',
     ].join(',');
     const REDIRECT_URI = new URL('callback.html', location.href).href;
