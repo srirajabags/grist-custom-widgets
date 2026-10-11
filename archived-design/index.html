@@ -118,7 +118,9 @@
           ['Order_Date', 'Order Date', 'p0vcfb8959b7e19d84f078d5f6cfa685273e7-MTAzMzc5MzAwMDAyMjM5OTAwNy0xMDMzNzkzMDAwMDIyMzk5MDEw'],
           ['Design_Name', 'Design Name', 'p0vcfb8959b7e19d84f078d5f6cfa685273e7-MTAzMzc5MzAwMDAyMjM5OTAwNy0xMDMzNzkzMDAwMDIyMzk5MDEx'],
         ],
-        // Filled by the widget, not from a column.
+        // Filled by the widget, not from a column. SHA-1 stays empty for direct
+        // uploads, but must still be sent: see templateBody.
+        sha1: 'p0vcfb8959b7e19d84f078d5f6cfa685273e7-MTAzMzc5MzAwMDAyMjM5OTAwNy0xMDMzNzkzMDAwMDIyMzk5MDEy',
         source: 'p0vcfb8959b7e19d84f078d5f6cfa685273e7-MTAzMzc5MzAwMDAyMjM5OTAwNy0xMDMzNzkzMDAwMDIyMzk5MDEz',
         archivedAt: 'p0vcfb8959b7e19d84f078d5f6cfa685273e7-MTAzMzc5MzAwMDAyMjM5OTAwNy0xMDMzNzkzMDAwMDIyMzk5MDE0',
       },
@@ -454,14 +456,23 @@
       });
       const text = await res.text();
       if (!res.ok) throw new Error(`WorkDrive ${res.status} ${text.slice(0, 200)}`);
-      return text ? JSON.parse(text) : null;
+      const json = text ? JSON.parse(text) : null;
+      // A batch call answers 207 with the items it rejected in meta.failed_events.
+      const failed = json?.meta?.failed_events || [];
+      if (failed.length) {
+        throw new Error(`WorkDrive rejected: ${failed.map((f) => `${f.error_code} ${f.error_description}`).join('; ')}`);
+      }
+      return json;
     }
 
+    // WorkDrive rejects an association that leaves out any of the template's
+    // fields (CF064 "CustomField id/count validation failed"), so every field is
+    // sent, empty ones as "".
     function templateBody(fileId, ctx) {
       const values = (t) => t.fields
-        .map(([name, , fieldId]) => ({ custom_field_id: fieldId, value: fmt(ctx.record[name]) }))
-        .filter((f) => f.value);
+        .map(([name, , fieldId]) => ({ custom_field_id: fieldId, value: fmt(ctx.record[name]) }));
       const order = values(TEMPLATES.order);
+      order.push({ custom_field_id: TEMPLATES.order.sha1, value: '' });
       order.push({ custom_field_id: TEMPLATES.order.source, value: `Direct upload: ${ctx.tableId}#${ctx.rowId} ${ctx.filesCol}` });
       order.push({ custom_field_id: TEMPLATES.order.archivedAt, value: istStamp(new Date()) });
       return {
@@ -555,7 +566,8 @@
         const size = Number(a.storage_info?.size_in_bytes);
         const names = (tags.data || []).map((t) => t.attributes.name);
         if (size !== file.size) throw new Error(`WorkDrive has ${size} bytes, the file has ${file.size}`);
-        if (!names.includes('Customer Details') || !names.includes('Order Details')) throw new Error(`templates missing: ${names.join(', ')}`);
+        const missing = ['Customer Details', 'Order Details'].filter((n) => !names.includes(n));
+        if (missing.length) throw new Error(`template missing in WorkDrive: ${missing.join(', ')}`);
         update(i, `✓ Same size (${file.size} bytes), both templates present`, 'done');
 
         i = step('Making the Grist preview…');
