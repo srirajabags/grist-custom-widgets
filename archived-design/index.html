@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Archived design</title>
+  <script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
+  <style>
+    :root {
+      --bg: #ffffff; --card: #ffffff; --text: #262633; --muted: #686881;
+      --border: #e2e4ea; --pill: #f2f3f7; --accent: #16b378; --accent-text: #ffffff;
+      --link: #1d6fd6; --warn-bg: #fff6e0; --warn: #8a5a00;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #262633; --card: #2f2f3d; --text: #efeff4; --muted: #a9a9bc;
+        --border: #44445a; --pill: #3a3a4b; --accent: #17b378; --accent-text: #ffffff;
+        --link: #6fb0ff; --warn-bg: #4a3b16; --warn: #ffd88a;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 10px; background: var(--bg); color: var(--text);
+      font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
+    }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
+    header .who { color: var(--muted); font-size: 12px; }
+    button, .btn {
+      display: inline-flex; align-items: center; gap: 6px; border-radius: 6px; padding: 6px 10px;
+      font: inherit; font-weight: 600; text-decoration: none; cursor: pointer;
+      border: 1px solid var(--border); background: var(--card); color: var(--text);
+    }
+    .btn.primary, button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+    .link-btn { border: 0; background: none; padding: 0; color: var(--link); font-weight: 500; }
+    .card { border: 1px solid var(--border); border-radius: 8px; background: var(--card); padding: 10px; margin-bottom: 10px; }
+    .title { font-weight: 600; word-break: break-word; }
+    .meta { color: var(--muted); font-size: 12px; margin-top: 2px; }
+    .badge { display: inline-block; font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 10px; margin-right: 6px; }
+    .badge.archived { background: #e6f6ef; color: #0d7a50; }
+    .badge.active { background: #eaf1fd; color: #1d5fb8; }
+    .preview { display: block; width: 100%; margin-top: 8px; border: 1px solid var(--border); border-radius: 6px; background: #fff; min-height: 60px; }
+    .caption { color: var(--muted); font-size: 11px; margin-top: 3px; }
+    .group { margin-top: 8px; }
+    .group h4 { margin: 0 0 4px; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+    .pill { display: inline-block; background: var(--pill); border-radius: 4px; padding: 2px 7px; margin: 0 4px 4px 0; font-size: 12px; }
+    .pill b { font-weight: 600; }
+    .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+    .note { background: var(--warn-bg); color: var(--warn); border-radius: 6px; padding: 6px 8px; margin-top: 8px; font-size: 12px; }
+    .empty { color: var(--muted); padding: 24px 8px; text-align: center; }
+  </style>
+</head>
+<body>
+  <header>
+    <span class="who" id="who"></span>
+    <span id="auth-action"></span>
+  </header>
+  <main id="app"><div class="empty">Select a row.</div></main>
+
+  <script>
+    // Shows the design files of the selected row. Files archived to Zoho WorkDrive
+    // (see Archived_Files) show the Grist thumbnail at once; after "Sign in with
+    // WorkDrive" they also show WorkDrive's large preview, both Data Templates and
+    // links to the original. Nothing here writes to Grist or WorkDrive.
+
+    // --- Configuration ---
+    const ZOHO_CLIENT_ID = '1000.0GM7KCXXOY5Z0QINYDTKQ7SK53JU6I'; // "Grist WorkDrive widgets", api-console.zoho.in
+    const ZOHO_AUTH_URL = 'https://accounts.zoho.in/oauth/v2/auth';
+    const ZOHO_SCOPE = 'WorkDrive.files.READ';
+    const REDIRECT_URI = new URL('callback.html', location.href).href;
+    const WD_API = 'https://www.zohoapis.in/workdrive/api/v1';
+    // Used when the browser can't call WorkDrive directly (CORS). Carries small
+    // JSON calls and preview images only; original files never go through it.
+    // TODO before staff use: replace with the narrow route in custom-widgets-proxy (W9).
+    const RELAY = 'https://cors-anywhere-production-b91c.up.railway.app/';
+    const ARCHIVE_TABLE = 'Archived_Files';
+    const TOKEN_KEY = 'archivedDesign.token';
+    const HANDOVER_KEY = 'archivedDesign.handover';
+    const STATE_KEY = 'archivedDesign.state';
+
+    grist.ready({
+      requiredAccess: 'full', // only used for a read-only token (getAccessToken({ readOnly: true }))
+      columns: [{ name: 'Files', title: 'Design file column', type: 'Attachments' }],
+    });
+
+    // --- Small DOM helper: text only, never innerHTML ---
+    function el(tag, attrs = {}, ...children) {
+      const node = document.createElement(tag);
+      for (const [k, v] of Object.entries(attrs)) {
+        if (v === undefined || v === null || v === false) continue;
+        if (k.startsWith('on')) node.addEventListener(k.slice(2), v);
+        else node.setAttribute(k, v);
+      }
+      for (const c of children.flat()) {
+        if (c === undefined || c === null || c === false) continue;
+        node.append(c instanceof Node ? c : document.createTextNode(String(c)));
+      }
+      return node;
+    }
+
+    const mb = (bytes) => `${(Number(bytes) / 1048576).toFixed(1)} MB`;
+    const day = (seconds) => seconds
+      ? new Date(seconds * 1000).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' })
+      : '';
+
+    // --- WorkDrive sign-in (implicit grant, token kept for its lifetime) ---
+    function readToken() {
+      try {
+        const t = JSON.parse(localStorage.getItem(TOKEN_KEY) || 'null');
+        if (t && t.accessToken && Date.now() < t.expiresAt) return t.accessToken;
+        localStorage.removeItem(TOKEN_KEY);
+      } catch (e) {}
+      return null;
+    }
+
+    function saveToken(accessToken, expiresInSeconds) {
+      try {
+        // Expire a minute early so a call never goes out with a dying token.
+        localStorage.setItem(TOKEN_KEY, JSON.stringify({
+          accessToken, expiresAt: Date.now() + (expiresInSeconds - 60) * 1000,
+        }));
+      } catch (e) {}
+    }
+
+    function signOut() {
+      try { localStorage.removeItem(TOKEN_KEY); } catch (e) {}
+      render();
+    }
+
+    function signIn() {
+      const state = crypto.randomUUID();
+      sessionStorage.setItem(STATE_KEY, state);
+      const url = new URL(ZOHO_AUTH_URL);
+      url.search = new URLSearchParams({
+        response_type: 'token', client_id: ZOHO_CLIENT_ID, scope: ZOHO_SCOPE,
+        redirect_uri: REDIRECT_URI, state,
+      });
+      window.open(url.href, 'wd-signin', 'width=520,height=680');
+    }
+
+    function acceptAuth(message) {
+      const expected = sessionStorage.getItem(STATE_KEY);
+      if (!message || message.type !== 'archived-design-auth' || !expected || message.state !== expected) return;
+      sessionStorage.removeItem(STATE_KEY);
+      if (message.error || !message.accessToken) {
+        showAuthError(message.error || 'no token returned');
+        return;
+      }
+      saveToken(message.accessToken, message.expiresIn);
+      render();
+    }
+
+    window.addEventListener('message', (event) => {
+      if (event.origin !== location.origin) return;
+      acceptAuth(event.data);
+    });
+
+    function takeHandover() {
+      try {
+        const raw = localStorage.getItem(HANDOVER_KEY);
+        if (!raw) return;
+        localStorage.removeItem(HANDOVER_KEY);
+        const message = JSON.parse(raw);
+        if (Date.now() - message.at < 5 * 60 * 1000) acceptAuth(message);
+      } catch (e) {}
+    }
+    window.addEventListener('storage', (event) => { if (event.key === HANDOVER_KEY) takeHandover(); });
+
+    let authError = '';
+    function showAuthError(err) { authError = `WorkDrive sign-in failed: ${err}`; render(); }
+
+    // --- API calls ---
+    class SignedOut extends Error {}
+
+    // WorkDrive checks the caller's origin against the app's registered
+    // JavaScript domains, so a direct call may work; fall back to the relay
+    // (per host) when the browser blocks it.
+    const viaRelay = new Map(); // host -> true/false once known
+
+    async function wdFetch(url, headers) {
+      const host = new URL(url).host;
+      if (viaRelay.get(host) !== true) {
+        try {
+          const res = await fetch(url, { headers });
+          viaRelay.set(host, false);
+          return res;
+        } catch (err) {
+          if (viaRelay.get(host) === false) throw err;
+          viaRelay.set(host, true);
+        }
+      }
+      return fetch(RELAY + url, { headers });
+    }
+
+    async function wd(path) {
+      const token = readToken();
+      if (!token) throw new SignedOut();
+      const res = await wdFetch(WD_API + path, {
+        Authorization: `Zoho-oauthtoken ${token}`, Accept: 'application/vnd.api+json',
+      });
+      if (res.status === 401) { try { localStorage.removeItem(TOKEN_KEY); } catch (e) {} throw new SignedOut(); }
+      if (!res.ok) throw new Error(`WorkDrive ${res.status}`);
+      return res.json();
+    }
+
+    async function wdImage(url) {
+      const token = readToken();
+      if (!token) throw new SignedOut();
+      const res = await wdFetch(url, { Authorization: `Zoho-oauthtoken ${token}` });
+      if (!res.ok) throw new Error(`Preview ${res.status}`);
+      return URL.createObjectURL(await res.blob());
+    }
+
+    async function gristAccess() {
+      const { token, baseUrl } = await grist.docApi.getAccessToken({ readOnly: true });
+      return { baseUrl, q: `auth=${encodeURIComponent(token)}` };
+    }
+
+    async function archivedRows(access, ids) {
+      const filter = encodeURIComponent(JSON.stringify({ Thumbnail_Attachment_Id: ids }));
+      const res = await fetch(`${access.baseUrl}/tables/${ARCHIVE_TABLE}/records?filter=${filter}&${access.q}`);
+      if (res.status === 404) return [];
+      if (!res.ok) throw new Error(`Grist ${res.status}`);
+      return (await res.json()).records;
+    }
+
+    async function attachmentMeta(access, id) {
+      const res = await fetch(`${access.baseUrl}/attachments/${id}?${access.q}`);
+      return res.ok ? res.json() : { fileName: `Attachment ${id}` };
+    }
+
+    // --- Rendering ---
+    let current = null;   // the selected record, already mapped
+    let renderSeq = 0;    // drops results of an earlier selection
+
+    function renderHeader() {
+      const signedIn = Boolean(readToken());
+      document.getElementById('who').textContent = signedIn ? 'WorkDrive: signed in' : 'WorkDrive: not signed in';
+      const slot = document.getElementById('auth-action');
+      slot.replaceChildren(signedIn
+        ? el('button', { class: 'link-btn', onclick: signOut }, 'Sign out')
+        : el('button', { class: 'primary', onclick: signIn }, 'Sign in with WorkDrive'));
+    }
+
+    async function render() {
+      const seq = ++renderSeq;
+      renderHeader();
+      const app = document.getElementById('app');
+      const stale = () => seq !== renderSeq;
+
+      if (current === undefined) {
+        app.replaceChildren(el('div', { class: 'empty' }, 'Choose the design file column in this widget\'s settings (“Design file column”).'));
+        return;
+      }
+      if (!current) { app.replaceChildren(el('div', { class: 'empty' }, 'Select a row.')); return; }
+      const ids = (Array.isArray(current.Files) ? current.Files : []).filter((x) => typeof x === 'number');
+      if (!ids.length) { app.replaceChildren(el('div', { class: 'empty' }, 'No design file on this row.')); return; }
+
+      let access, rows;
+      try {
+        access = await gristAccess();
+        rows = await archivedRows(access, ids);
+      } catch (err) {
+        if (!stale()) app.replaceChildren(el('div', { class: 'note' }, `Could not read ${ARCHIVE_TABLE}: ${err.message}`));
+        return;
+      }
+      if (stale()) return;
+
+      const byThumb = new Map(rows.map((r) => [r.fields.Thumbnail_Attachment_Id, r.fields]));
+      const cards = [];
+      if (authError) cards.push(el('div', { class: 'note' }, authError));
+      for (const id of ids) {
+        cards.push(byThumb.has(id) ? archivedCard(access, id, byThumb.get(id), stale) : activeCard(access, id));
+      }
+      app.replaceChildren(...cards);
+    }
+
+    function activeCard(access, id) {
+      const title = el('div', { class: 'title' }, '…');
+      const meta = el('div', { class: 'meta' });
+      attachmentMeta(access, id).then((m) => {
+        title.textContent = m.fileName;
+        meta.textContent = m.fileSize ? mb(m.fileSize) : '';
+      });
+      return el('div', { class: 'card' },
+        el('span', { class: 'badge active' }, 'In Grist'), title, meta);
+    }
+
+    function archivedCard(access, thumbId, row, stale) {
+      const img = el('img', {
+        class: 'preview', alt: `Preview of ${row.Original_Name}`,
+        src: `${access.baseUrl}/attachments/${thumbId}/download?${access.q}`,
+      });
+      const caption = el('div', { class: 'caption' }, 'Thumbnail stored in Grist (800 px)');
+      const details = el('div');
+      const actions = el('div', { class: 'actions' },
+        row.WD_Permalink && el('a', { class: 'btn primary', href: row.WD_Permalink, target: '_blank', rel: 'noopener' }, 'Open in WorkDrive'));
+
+      const card = el('div', { class: 'card' },
+        el('span', { class: 'badge archived' }, 'Archived to WorkDrive'),
+        el('div', { class: 'title' }, row.Original_Name),
+        el('div', { class: 'meta' }, [mb(row.Size_Bytes), row.Archived_At && `archived ${day(row.Archived_At)}`].filter(Boolean).join(' · ')),
+        img, caption, details, actions);
+
+      if (!readToken()) {
+        details.append(
+          el('div', { class: 'group' }, el('h4', {}, 'From Grist'),
+            el('span', { class: 'pill' }, el('b', {}, 'Customer: '), row.Customer_IDs || '—'),
+            el('span', { class: 'pill' }, el('b', {}, 'Order: '), row.Order_IDs || '—')),
+          el('div', { class: 'note' }, 'Sign in with WorkDrive to see the large preview and all template details.'));
+        return card;
+      }
+
+      loadWorkDrive(row.WD_File_ID, { img, caption, details, actions }, stale).catch((err) => {
+        if (stale()) return;
+        if (err instanceof SignedOut) { render(); return; }
+        details.append(el('div', { class: 'note' }, `WorkDrive: ${err.message}. You may not have access to the archive folder.`));
+      });
+      return card;
+    }
+
+    async function loadWorkDrive(fileId, ui, stale) {
+      const [file, templates, preview] = await Promise.all([
+        wd(`/files/${fileId}`),
+        wd(`/files/${fileId}/custommetadata`),
+        wd(`/files/${fileId}/previewinfo`).catch(() => null),
+      ]);
+      if (stale()) return;
+
+      for (const t of templates.data || []) {
+        const a = t.attributes;
+        ui.details.append(el('div', { class: 'group' }, el('h4', {}, a.name),
+          (a.custom_data || []).filter((f) => f.value).map((f) =>
+            el('span', { class: 'pill' }, el('b', {}, `${f.display_name}: `), f.value))));
+      }
+
+      const download = file.data?.attributes?.download_url;
+      if (download) ui.actions.append(el('a', { class: 'btn', href: download, target: '_blank', rel: 'noopener' }, 'Download original'));
+
+      // WorkDrive only renders previews for files up to 250 MB; larger ones
+      // keep the Grist thumbnail.
+      const p = preview?.data?.attributes;
+      if (p?.preview_data_url && p.preview_status === 1) {
+        const src = await wdImage(p.preview_data_url);
+        if (stale()) { URL.revokeObjectURL(src); return; }
+        ui.img.src = src;
+        ui.caption.replaceChildren('WorkDrive preview · ',
+          el('a', { href: p.preview_url, target: '_blank', rel: 'noopener' }, 'open full size'));
+      } else {
+        ui.caption.textContent = 'Thumbnail stored in Grist (800 px). WorkDrive has no preview for this file.';
+      }
+    }
+
+    grist.onRecord((record) => {
+      current = grist.mapColumnNames(record) || undefined;
+      authError = '';
+      render();
+    });
+
+    takeHandover();
+    renderHeader();
+  </script>
+</body>
+</html>

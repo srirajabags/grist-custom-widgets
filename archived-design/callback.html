@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WorkDrive sign-in</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: 24px; color: #262633; }
+  </style>
+</head>
+<body>
+  <p id="msg">Signing in…</p>
+  <script>
+    // Zoho redirects here after sign-in with the token in the URL fragment.
+    // Hand it to the widget that opened this window, then close.
+    const params = new URLSearchParams(location.hash.slice(1));
+    const query = new URLSearchParams(location.search);
+    // Remove the token from the address bar and history straight away.
+    history.replaceState(null, '', location.pathname);
+
+    const message = {
+      type: 'archived-design-auth',
+      state: params.get('state') || query.get('state'),
+      accessToken: params.get('access_token'),
+      expiresIn: Number(params.get('expires_in')) || 3600,
+      error: params.get('error') || query.get('error'),
+    };
+
+    // Two routes back to the widget, both limited to this site:
+    // 1. postMessage to the opener, only if it is on this origin.
+    if (window.opener) {
+      window.opener.postMessage(message, location.origin);
+    }
+    // 2. A one-off localStorage hand-over, in case the sign-in pages cut the
+    //    link to the opener. The widget picks it up and deletes it.
+    try {
+      localStorage.setItem('archivedDesign.handover', JSON.stringify({ ...message, at: Date.now() }));
+    } catch (e) {}
+
+    document.getElementById('msg').textContent = message.error
+      ? `Sign-in failed: ${message.error}. You can close this window.`
+      : 'Signed in. You can close this window.';
+    if (!message.error) setTimeout(() => window.close(), 300);
+  </script>
+</body>
+</html>
