@@ -540,7 +540,12 @@
       const { token, baseUrl } = await grist.docApi.getAccessToken({ readOnly: false });
       const form = new FormData();
       form.append('upload', blob, name);
-      const res = await fetch(`${baseUrl}/attachments?auth=${encodeURIComponent(token)}`, { method: 'POST', body: form });
+      // Writes made with an access token must carry X-Requested-With (Grist's
+      // CSRF check); without it Grist answers 401 before adding CORS headers,
+      // which the browser reports only as "Failed to fetch".
+      const res = await fetch(`${baseUrl}/attachments?auth=${encodeURIComponent(token)}`, {
+        method: 'POST', body: form, headers: { 'X-Requested-With': 'XMLHttpRequest' },
+      });
       if (!res.ok) throw new Error(`Grist attachment upload ${res.status}`);
       return (await res.json())[0];
     }
